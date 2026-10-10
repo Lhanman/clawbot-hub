@@ -182,6 +182,11 @@ Bark 请求失败时 MUST 分两类处理：
 - **WHEN** 数据库里没有任何窗口（`never_contacted`），项目的推送被拒绝；10 分钟后另一个项目也被拒绝
 - **THEN** 只发一条（去重单位 `none`）
 
+#### Scenario: 重新绑定以后再次没收到过消息
+
+- **WHEN** 从没收到过消息时已经发过一次告警（`none`）；使用者后来发话开了窗口，又过了 13 小时 `hubctl login` 重新绑定（窗口作废），项目的推送因为 `never_contacted` 被拒绝
+- **THEN** 再发一条"微信消息没发出去"（`none` 在使用者发话时已经清掉，距上一条超过 12 小时）
+
 #### Scenario: 备份失败
 
 - **WHEN** 每日备份因为磁盘满失败，10 分钟后重试仍失败；当天晚些时候备份又失败
@@ -234,7 +239,7 @@ Bark 请求失败时 MUST 分两类处理：
 
 - `login_expired` / `login_restored`：一次失效（从失效开始到恢复）。
 - `window_expiring`、`upstream_blocked`：一个窗口。
-- `window_blocked`：一个窗口（没有窗口时用固定的 `none`）只告警一次，并且两条同类告警之间不少于 `alerts.blocked.min_interval_hours`（默认 12）小时；被间隔压住的拒绝累计到间隔一满的下一轮。"已告警窗口"记在告警状态表里（键 `window_blocked:<窗口编号或 none>`）。
+- `window_blocked`：一个窗口（没有窗口时用固定的 `none`）只告警一次，并且两条同类告警之间不少于 `alerts.blocked.min_interval_hours`（默认 12）小时；被间隔压住的拒绝累计到间隔一满的下一轮。"已告警窗口"记在告警状态表里（键 `window_blocked:<窗口编号或 none>`）；使用者发话开出新窗口时，`none` 这一条清掉（"没收到过消息"的那一段结束了），以后再遇到（比如重新绑定账号之后）可以再告警。
 - `send_unconfirmed`：一段连续未确认的时间，一次确认送达后重置。
 - `upstream_down` / `upstream_restored`：一段连不上的时间。
 - `service_restarted`：`alerts.restart_merge_minutes`（默认 10）分钟内最多一次（防止崩溃后反复重启时刷屏）。

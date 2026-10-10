@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# 服务自己的数据（默认在 ~/.clawbot-hub，不在仓库里；万一指到仓库里也不进 git）
+data/
+.clawbot-hub/
+*.db
+*.db-wal
+*.db-shm
+account.json
+config.yaml.local
+
+# 密钥和凭证：任何形式都不提交
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# 日志、二维码图片、备份
+logs/
+backups/
+*.log
+clawbot-login*.png
+
+# 编辑器、系统
+.DS_Store
+.idea/
+.vscode/

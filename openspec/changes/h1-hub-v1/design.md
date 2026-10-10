@@ -203,7 +203,7 @@ CREATE TABLE events (id INTEGER PRIMARY KEY, ts_ms INTEGER NOT NULL, level TEXT 
 
 ### 5. 额度判定
 
-`quota.decide(window, projects, request, cfg) -> Decision` 是纯函数，按 `hub-quota` 里写的顺序判定，输出 `Allow(n)` 或 `Deny(reason_code, 数字)`；原因文字由 `sender` 用同一个模板表生成（`hub-send` 的表）。`quota.reserve(conn, ...)` 在一个 `BEGIN IMMEDIATE` 事务里：读当前窗口和各项目用量 → `decide` → 通过就 `UPDATE usage`，并给这个请求的 `outbox` 行（第 6 节开头已经插好，状态 `sending`）补上预占窗口 W 和对话凭证；不通过就把这一行改成 `rejected` 并写原因码。
+`quota.decide(window, projects, request, cfg) -> Decision` 是纯函数，按 `hub-quota` 里写的顺序判定，输出 `Allow(n)` 或 `Deny(reason_code, 数字)`；原因文字由 `sender` 用同一个模板表生成（`hub-send` 的表）。`quota.reserve(conn, ...)` 是第 6 节那个 `BEGIN IMMEDIATE` 事务的最后一段：读当前窗口和各项目用量 → `decide` → 通过就 `UPDATE usage`，并给这个请求的 `outbox` 行补上预占窗口 W 和对话凭证；不通过就把这一行改成 `rejected` 并写原因码。
 
 用量的算式（再写一遍，实现按这个）：
 
@@ -224,13 +224,13 @@ pool          = free − reserve_left − Σ unused_g
 
 检查顺序（`hub-send` 里有同样的表）：校验正文和字段 → 去重键 → `too_long`（拆出的条数超过 L−R 或回复的 L）→ 登录状态（`login_*`，不看 `on_closed`）→ 窗口关着（`on_closed: skip` 则 `skipped`，否则 `rejected`）→ 推送处于暂停期（`upstream_blocked`）→ `quota.decide` → 预占 → 拿发送锁 → 逐条发。
 
-**发送记录什么时候插入**：字段校验通过、拆完条（纯计算，没有副作用）以后，**先插 `outbox` 行**（状态 `sending`，带 `dedupe_key` 的同时占键；撞上部分唯一索引就是键被占着，走下面"同一个去重键的并发请求"，所以去重命中先于 `too_long`）。之后每一步检查不通过，都把这一行改成 `rejected` / `failed` / `skipped` 并写原因码，键随之释放。所以被拒绝的请求也留一行记录（`window_blocked` 汇总数的就是这些行），两个同键请求不会同时通过去重检查。
+**发送记录什么时候插入**：字段校验通过、拆完条（纯计算，没有副作用）以后，**在同一个 `BEGIN IMMEDIATE` 事务里**依次做：插 `outbox` 行（状态 `sending`，带 `dedupe_key` 的同时占键；撞上部分唯一索引就是键被占着，事务回滚，走下面"同一个去重键的并发请求"，所以去重命中先于 `too_long`）→ `too_long` → 登录状态 → 窗口 → 暂停期（这几项都只读库）→ `quota.decide` → 通过就预占。任何一步不通过，都把这一行改成 `rejected` / `failed` / `skipped` 并写原因码，键随之释放，事务提交；通过的提交以后才去拿发送锁。所以被拒绝的请求也留一行记录（`window_blocked` 汇总数的就是这些行）；不会留下"发送中却没有预占"的记录；两个同键请求不会同时通过去重检查。
 
 ```
-请求 ──► 校验 ──► 拆条、插发送记录(占键) ──► 登录/窗口/暂停 ──► 判定额度 ──► 预占 ──► 拿发送锁
-                       │ 命中                │ 拒绝/跳过             │ 等锁到时限、或服务在关闭
-                       ▼                     ▼                      ▼
-             返回原结果(duplicate)    rejected / skipped    退回预占，failed(busy)
+请求 ──► 校验、拆条 ──► 一个事务（插发送记录占键 → 登录/窗口/暂停 → 判定额度 → 预占）──► 拿发送锁
+                          │ 键被占着              │ 拒绝 / 跳过 / 登录失败          │ 等锁到时限、或服务在关闭
+                          ▼                       ▼                                 ▼
+                返回原结果(duplicate)    rejected / skipped / failed      退回预占，failed(busy)
 拿到锁 ─► 逐条发 ──► Accepted(有编号)            → sent，对账
                  ├─► Accepted(无编号) strict      → unconfirmed
                  │                    observe/off → sent（observe 记 no_message_id）

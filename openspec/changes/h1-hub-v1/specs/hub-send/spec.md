@@ -59,6 +59,11 @@
 - **WHEN** 请求里多带一个叫 `foo` 的字段 / `priority` 写成 `high`
 - **THEN** 前者照常处理；后者 400 `bad_request`，提示可选值，没有发任何东西，也不占条数
 
+#### Scenario: on_closed 写错值
+
+- **WHEN** 请求里 `on_closed` 写成 `ignore`
+- **THEN** 400 `bad_request`，提示可选值 `fail`、`skip`，没有发任何东西，也不占条数
+
 #### Scenario: 空消息
 
 - **WHEN** `text` 只有空格和换行
@@ -189,11 +194,13 @@
 |---|---|---|
 | DNS 失败、连接被拒、连接超时、TLS 握手失败；收到完整的 HTTP 429 或 5xx 响应（不看响应体，里面带 -14 也一样） | 没发出去 | 可重试，最多 `send.retries`（默认 2）次，间隔 1 秒、2 秒；重试 MUST 用同一个 `client_id`；用完还不行：这一条没发出去，`upstream_unreachable` |
 | 请求发完之后读超时；连接被对方重置或关闭；响应读到一半断开 | 不知道到没到 | **不重试**。这一条算 `unconfirmed`（`no_response`），条数保持已用；后面的条数不再发 |
-| HTTP 4xx（429 除外），或业务码非 0 且不是 -14 | 明确拒绝 | 不重试；这一条没发出去，`upstream_rejected`（只有 HTTP 码时写 `HTTP <状态码>`） |
-| 业务码是 -14 | 登录失效 | 见 `hub-login`；这一条和后面的都不发，`login_expired` |
-| HTTP 200，`ret` 和 `errcode` 都没有或为 0 | 腾讯接受了 | 再看有没有**消息编号**（返回体里 `send.message_id_keys`，默认 `message_id`、`msg_id` 的任何一个有非空、非 0 的值）：有 → 这一条 `sent`；没有 → 看 `upstream.confirm`：`strict` 时这一条 `unconfirmed`（`no_message_id`），`observe`（默认）和 `off` 时 `sent`。`observe` 额外把"没有消息编号"记进数据库，连续出现会触发告警（见 `hub-alerts`）。这两种情形都继续发后面的条数 |
+| HTTP 状态不是 200 的 4xx（429 除外）、2xx、3xx 响应且响应体里没有 -14；或 HTTP 200 而业务码非 0 且不是 -14 | 明确拒绝 | 不重试；这一条没发出去，`upstream_rejected`（只有 HTTP 码时写 `HTTP <状态码>`） |
+| 业务码是 -14（HTTP 状态不是 429 / 5xx 时才看响应体：4xx、非 200 的 2xx / 3xx 里带 -14 也算） | 登录失效 | 见 `hub-login` 的"登录失效"：先重读凭证文件，**不重试**（对话凭证属于旧账号，换了新凭证也发不出去）；这一条和后面的都不发，额度退回，`login_expired`；正在换凭证的情形下（见 `hub-login`）不改登录状态、不告警 |
+| HTTP 200，`ret` 和 `errcode` 都没有或为 0（响应体不是 JSON 对象——空的、网关页面——也按"都没有"算，与 ashare-quant 一致） | 腾讯接受了 | 再看有没有**消息编号**（返回体里 `send.message_id_keys`，默认 `message_id`、`msg_id` 的任何一个有非空、非 0 的值）：有 → 这一条 `sent`；没有 → 看 `upstream.confirm`：`strict` 时这一条 `unconfirmed`（`no_message_id`），`observe`（默认）和 `off` 时 `sent`。`observe` 额外把"没有消息编号"记进数据库，连续出现会触发告警（见 `hub-alerts`）。这两种情形都继续发后面的条数 |
 
-**总时限。** 预算从服务开始处理这个 POST 起算 `send.timeout_seconds`（默认 30）秒，等发送锁和向腾讯发请求共用这一份。每一次向腾讯发请求，连接超时和读超时都取 `min(upstream.request_timeout, 剩下的预算)`（`upstream.request_timeout` 默认 15 秒，所以默认下一次请求最多等 15 秒）。**每一次向腾讯发请求之前（包括下一条的第一次尝试和重试），剩下的预算不足 1 秒（固定值，见 design 的定值表）的，就不再开始**：这一条算"没来得及发"；重试被这条规则拦下时，这一条沿用它上一次失败的原因（例如 `upstream_unreachable`），不改成 `send_timeout`。到点时：
+**一段没发出去，后面的段就不发了。** 拆成多段时，某一段没发出去（重试用完、明确拒绝、登录失效、没来得及发，原因不论），或者拿不准到没到（读超时、连接被重置这类 `no_response`），后面的段 MUST NOT 再发：它们的额度退回，算"没来得及发"。这样使用者不会收到缺了中间一段的内容。（严格档下 `no_message_id` 的未确认是腾讯明确接受了，照上表继续发后面的段。）
+
+**总时限。** 预算从服务开始处理这个 POST 起算 `send.timeout_seconds`（默认 30）秒，等发送锁和向腾讯发请求共用这一份。每一次向腾讯发请求，连接超时和读超时都取 `min(upstream.request_timeout, 剩下的预算)`（`upstream.request_timeout` 默认 15 秒，所以默认下一次请求最多等 15 秒）。**每一次向腾讯发请求之前（包括下一条的第一次尝试和重试），剩下的预算不足 1 秒（固定值，见 design 的"固定常量"表）的，就不再开始**：这一条算"没来得及发"；重试被这条规则拦下时，这一条沿用它上一次失败的原因（例如 `upstream_unreachable`），不改成 `send_timeout`。到点时：
 
 - 还在等发送锁：`failed` / `busy`，预占的条数全部退回（服务正在关闭时，还在等锁的请求也马上这样结束，见 `hub-deploy`）；
 - 某一条已经发出、正在等回话：就是读超时，按上表算 `unconfirmed`（`no_response`）；
@@ -221,6 +228,21 @@
 - **WHEN** 假上游回 HTTP 403，没有业务码
 - **THEN** `failed` / `upstream_rejected`，原因含"微信 ClawBot 拒绝：HTTP 403"；只收到一次请求
 
+#### Scenario: 4xx 响应里带 -14 也算登录失效
+
+- **WHEN** 假上游回 HTTP 401，响应体里有 `errcode: -14`
+- **THEN** 按 -14 处理：`failed` / `login_expired`（正在换凭证的情形除外，见 `hub-login`）；假上游只收到一次请求
+
+#### Scenario: HTTP 200 但响应体不是 JSON
+
+- **WHEN** 假上游回 HTTP 200，响应体是一段 HTML（或者是空的）
+- **THEN** 当作没有业务码、没有消息编号：观察档（默认）`sent`，数据库里标着"没有消息编号"；严格档 `unconfirmed` / `no_message_id`；两种情形假上游都只收到一次请求
+
+#### Scenario: HTTP 201 不算接受
+
+- **WHEN** 假上游回 HTTP 201，响应体是 `{"ret": 0}`
+- **THEN** `failed` / `upstream_rejected`，原因含"微信 ClawBot 拒绝：HTTP 201"；只收到一次请求
+
 #### Scenario: ret 和 errcode 同时有
 
 - **WHEN** 假上游回 `{"ret": 5, "errcode": -14}`
@@ -229,7 +251,7 @@
 #### Scenario: 服务端出错重试
 
 - **WHEN** 假上游前两次回 503，第三次成功
-- **THEN** 共 3 次请求，三次的 `client_id` 相同，最终 `sent`
+- **THEN** 共 3 次请求，三次的 `client_id` 相同，第 1、2 次之间隔 1 秒，第 2、3 次之间隔 2 秒（假时钟），最终 `sent`
 
 #### Scenario: 5xx 响应里带 -14 也只是重试
 
@@ -265,6 +287,11 @@
 
 - **WHEN** 拆成 3 条，第 1 条成功，第 2 条读超时
 - **THEN** `partial`、`parts_sent` 2、原因码 `no_response`；第 3 条没有发出，它的额度退回；第 1、2 条保持已用
+
+#### Scenario: 一段重试用完以后不发后面的
+
+- **WHEN** 拆成 3 条，第 1 条成功，第 2 条假上游连续 3 次连不上（重试用完）
+- **THEN** `partial`、`parts` 3、`parts_sent` 1、原因码 `upstream_unreachable`，原因含"发出了 1 条，共 3 条"；第 3 条没有发出；第 2、3 条的额度退回；假上游一共收到 4 次连接尝试（第 1 条 1 次，第 2 条 3 次）
 
 #### Scenario: 发送期间登录失效
 

@@ -85,6 +85,11 @@
 - **WHEN** 配置的端口已经被别的程序占着
 - **THEN** 启动失败，提示端口被占用，退出码 1，没有向腾讯发任何请求
 
+#### Scenario: 文档提醒局域网是明文
+
+- **WHEN** 测试检查 `README.md` 和 `docs/ops/安装说明.md`
+- **THEN** 两份文档都写明局域网监听时密钥是明文走局域网的（含"明文"二字），只在可信的家庭网络里开
+
 ### Requirement: 健康检查和版本
 
 `GET /v1/health`（不需要密钥）MUST 只返回 `{"ok": true, "version": "<服务版本>", "api": "1"}`（`api` 是字符串），不含登录、窗口、项目的任何信息；服务正在关闭时返回 503 `shutting_down`。给 launchd 之外的监控或脚本探活用。`GET /v1/status` 需要密钥，内容见 `hub-quota`。
@@ -126,7 +131,7 @@
 
 ### Requirement: 配置
 
-配置文件 `<home>/config.yaml` 可以没有，全部项都有默认值；只在服务启动时读一次。校验 MUST 一次列出全部错误：数值在合理范围（条数、秒数、端口）、枚举值认识（`upstream.profile` 是 `legacy` 或 `official`，`upstream.confirm` 是 `strict`、`observe`、`off`）、`routing.confirm_words` 不为空、显示时区认识、`quota.window_limit` 至少比 `quota.reply_reserve` 大 1、`send.part_chars` 不小于 200（再小的话，标题和开头占掉大半，一条里放不下正文）、`server.lan` 与 `server.host` 的关系（见"谁能连"）。
+配置文件 `<home>/config.yaml` 可以没有，全部项都有默认值；只在服务启动时读一次。校验 MUST 一次列出全部错误：数值在 `design.md` 第 13 节"取值范围"表给的范围内（表里没有的数值键必须是 1 到 1000000 的整数）、枚举值认识（`upstream.profile` 是 `legacy` 或 `official`，`upstream.confirm` 是 `strict`、`observe`、`off`）、`routing.confirm_words` 不为空、`hub.label` 和确认词里的每个词只含字母、数字、汉字且 1 到 8 个字符（与前缀同一套规则，空串、带空白或标点的都不行）、显示时区认识、`quota.window_limit` 至少比 `quota.reply_reserve` 大 1、`send.part_chars` 不小于 200（再小的话，标题和开头占掉大半，一条里放不下正文）、`server.lan` 与 `server.host` 的关系（见"谁能连"）。
 
 `server.shutdown_seconds` 小于 `send.timeout_seconds` 时**只警告**、不拒绝启动（写一条事件，`hubctl doctor` 报告）：这样关停时可能等不到最后一条发完，下次启动那条记录会是"中断"。
 
@@ -136,6 +141,16 @@
 
 - **WHEN** 配置里窗口总条数写成 `-1`、端口写成 `70000`、`upstream.profile` 写成 `x`
 - **THEN** 一次列出三处错误，退出码 1，没有监听端口
+
+#### Scenario: 数值越界
+
+- **WHEN** 配置里 `routing.confirm_seconds` 写成 3600、`send.timeout_seconds` 写成 1、`send.max_chars` 写成 70000、`send.retries` 写成 9
+- **THEN** 一次列出四处错误（各写明允许的范围），退出码 1，没有监听端口；改成 1800、2、60000、5 时都通过
+
+#### Scenario: 服务指令词和确认词的格式
+
+- **WHEN** 配置里 `hub.label` 写成空串，`routing.confirm_words` 写成 `["对", "好,的"]`
+- **THEN** 一次列出两处错误，退出码 1，没有监听端口
 
 #### Scenario: 窗口总条数改小了
 
@@ -231,6 +246,16 @@
 - **WHEN** 一条发送卡在腾讯那边超过 `server.shutdown_seconds`（假时钟）
 - **THEN** 服务强行退出，退出码 1，`run.json` 不记"正常退出"；下次启动这条记录是"中断"，预占的条数保留，并发一条 `service_restarted` 告警
 
+#### Scenario: 关闭期间的新请求
+
+- **WHEN** 一条发送正在进行，服务收到 `SIGTERM`，此时又来了一个 `POST /v1/messages`、一个 `GET /v1/inbox` 和一个 `GET /v1/health`
+- **THEN** 三个请求都是 503 `shutting_down`，没有碰腾讯；正在进行的那一条照常发完
+
+#### Scenario: 官方档退出时调 notifystop
+
+- **WHEN** `upstream.profile: official`，服务收到 `SIGTERM`（另一次：假上游对 `notifystop` 回 500）
+- **THEN** 退出之前假上游收到一次 `notifystop`；回 500 时只记一条警告，服务照常退出，退出码 0；默认的 `legacy` 档不调 `notifystop`
+
 ### Requirement: 数据库和升级
 
 数据库是 SQLite（WAL 模式，外键打开，`busy_timeout` 为 `db.busy_timeout_ms`，默认 5000，每个连接 `secure_delete` 打开），库里有一张版本表。升级 MUST 只往前：按编号顺序执行 `clawbot_hub/migrations/` 里的脚本，每个脚本在一个事务里；升级之前先自动备份（命名 `pre-upgrade-v<旧版本>-v<新版本>-<时间>`，见 `hub-cli`）。启动时看到版本比程序新，退出码 3。
@@ -294,9 +319,9 @@
 
 仓库 MUST 带：
 
-- `deploy/launchd/com.clawbot-hub.serve.plist.example`：登录后启动（`RunAtLoad`）；`KeepAlive` 写成 `{SuccessfulExit: false}`，也就是崩溃和非 0 的退出码才会被拉起，正常退出（退出码 0，比如 `launchctl stop`、`SIGTERM`）不会被拉起，所以操作者停服务不会被 launchd 立刻拉回来；`ThrottleInterval` 30 秒（避免退出码 2 时空转）；`Umask` 63（即 077）；工作目录、`uv run hubctl serve` 的完整路径占位符、日志指向 `<home>/logs/launchd.log`。
-- `docs/ops/安装说明.md`：在 Mac 上从零装起来的步骤（装 uv、拉代码、`uv sync`、`hubctl login`、`hubctl project add`、`hubctl alerts set-key`、装 launchd、装好后 `ls -l` 看一眼 `launchd.log` 的权限是不是 0600、`hubctl doctor`），每一步写明预期输出。文档里"停服务"一律写成 `launchctl bootout`。
-- `docs/ops/迁移手册.md`：把 ashare-quant 现有的 ClawBot 凭证迁进来的逐步操作，含停旧启新的顺序（导入凭证前必须先 `launchctl bootout` 停掉服务）、校验方法、回退步骤（对应设计方案第 8 节），并标明哪些步骤要使用者本人在场（周末切换、手机上发一句话看结果）。
+- `deploy/launchd/com.clawbot-hub.serve.plist.example`：登录后启动（`RunAtLoad`）；`KeepAlive` 写成 `{SuccessfulExit: false}`，也就是崩溃和非 0 的退出码才会被拉起，正常退出（退出码 0，比如 `launchctl stop`、`SIGTERM`）不会被拉起，所以操作者停服务不会被 launchd 立刻拉回来；`ThrottleInterval` 30 秒（避免退出码 2 时空转）；`ExitTimeOut` 45 秒（`launchctl bootout` 先发 `SIGTERM`、等这么久再 `SIGKILL`；必须大于默认的 `server.shutdown_seconds`，否则优雅关停没等满就被杀）；`Umask` 63（即 077）；工作目录、`uv run hubctl serve` 的完整路径占位符、日志指向 `<home>/logs/launchd.log`。
+- `docs/ops/安装说明.md`：在 Mac 上从零装起来的步骤（演练一律用单独的数据目录和端口——`CLAWBOT_HUB_HOME=~/.clawbot-hub-rehearsal`，launchd 演练用另一个 label——演练完整个目录移走；装 uv、拉代码、`uv sync`、`hubctl login`、`hubctl project add`、`hubctl alerts set-key`、装 launchd、装好后 `ls -l` 看一眼 `launchd.log` 的权限是不是 0600、`hubctl doctor`），每一步写明预期输出。文档里"停服务"一律写成 `launchctl bootout`。
+- `docs/ops/迁移手册.md`：把 ashare-quant 现有的 ClawBot 凭证迁进来的逐步操作，含停旧启新的顺序（导入凭证前必须先 `launchctl bootout` 停掉服务；第一步检查正式数据目录里没有演练遗留——指向假上游的 `account.json`、演练登记的项目，有就先移走）、校验方法、回退步骤（对应设计方案第 8 节），并标明哪些步骤要使用者本人在场（周末切换、手机上发一句话看结果）。
 - `docs/ops/回退手册.md`：服务出问题时让项目退回直连 / 只用 Bark 的办法，以及怎么恢复备份。
 - `docs/ops/真机验证清单.md`：腾讯一侧的规则必须在真机上确认的几项——发送返回里到底有没有消息编号（决定 `upstream.confirm` 能不能改成 `strict`）、`legacy` 与 `official` 两档在真账号上有没有差别（含 `official` 的 `POST` 取二维码）、窗口时长和条数的实测、回复用的对话凭证能用多久、"一号一绑"是否成立、带着旧的 `get_updates_buf` 再收是否重发同一批消息、长轮询读超时算不算完成往返、launchd 的 `Umask` 对 `launchd.log` 是否生效（不生效就把标准输出和错误指向 `/dev/null`，服务自己已经写 `hub.log`）——每项写明怎么测、怎么记结果。
 
@@ -305,16 +330,21 @@
 #### Scenario: launchd 模板可用
 
 - **WHEN** 把模板里的占位符换成实际路径、运行 `plutil -lint`（在 Mac 上）或用测试里的 plist 解析器解析
-- **THEN** 是合法的 plist，含 `RunAtLoad`、`ThrottleInterval`、`Umask`（值 63），`KeepAlive` 是字典且 `SuccessfulExit` 为假，不含任何密钥
+- **THEN** 是合法的 plist，含 `RunAtLoad`、`ThrottleInterval`、`Umask`（值 63）、`ExitTimeOut`（值大于默认的 `server.shutdown_seconds`），`KeepAlive` 是字典且 `SuccessfulExit` 为假，不含任何密钥
 
 #### Scenario: 文档里停服务的写法
 
 - **WHEN** 测试检查 `docs/ops/` 下的安装说明和迁移手册
 - **THEN** 停服务的步骤写的是 `launchctl bootout`，没有单独的 `kill` 或 `launchctl stop` 让人以为能停住
 
+#### Scenario: 文档里演练和正式分开
+
+- **WHEN** 测试检查 `docs/ops/安装说明.md` 和 `docs/ops/迁移手册.md`
+- **THEN** 安装说明写明演练用单独的数据目录（含 `CLAWBOT_HUB_HOME`）；迁移手册的第一步写明检查正式数据目录里没有演练遗留
+
 ### Requirement: 测试不联网
 
-单元测试和合约测试 MUST 不联网：`pytest` 启动时装一个套接字守卫，只放行本机回环（`127.0.0.1`、`::1`），连其他地址直接抛错；腾讯的接口一律由 `tests/support/fake_ilink.py`（一个本机回环上的假服务，能按剧本模拟登录各状态、收发、-14、5xx、超时、没有消息编号、窗口规则；也能独立运行：`python -m tests.support.fake_ilink --port N`，给不经 pytest 的演练用）代替，Bark 也用本机假服务。真实腾讯接口的测试放在 `tests/live/test_real_ilink.py`，用 `live` 标记，默认不运行（`uv run pytest -m live` 才运行，且需要使用者在场授权）。服务里所有用到时间和睡眠的地方 MUST 通过可替换的时钟（测试里用假时钟，不真等）。
+单元测试和合约测试 MUST 不联网：`pytest` 启动时装一个套接字守卫，只放行本机回环（`127.0.0.1`、`::1`），连其他地址直接抛错；腾讯的接口一律由 `tests/support/fake_ilink.py`（一个本机回环上的假服务，能按剧本模拟登录各状态、收发、-14、5xx、超时、没有消息编号、窗口规则；也能独立运行：`python -m tests.support.fake_ilink --port N`，给不经 pytest 的演练用；独立运行时在同一个端口上另开 `/_fake/` 控制接口：`POST /_fake/inbox` 放一条使用者消息、`GET /_fake/sent` 看收到的 `sendmessage`、`POST /_fake/mode` 切换成断开连接 / 回 -14 / 回 5xx / 恢复正常；扫码默认 `--confirm-after` 3 秒后自动变成已确认）代替，Bark 也用本机假服务。真实腾讯接口的测试放在 `tests/live/test_real_ilink.py`，用 `live` 标记，默认不运行（`uv run pytest -m live` 才运行，且需要使用者在场授权）。服务里所有用到时间和睡眠的地方 MUST 通过可替换的时钟（测试里用假时钟，不真等）。
 
 #### Scenario: 守卫生效
 
@@ -329,7 +359,7 @@
 #### Scenario: 假腾讯能独立运行
 
 - **WHEN** 运行 `python -m tests.support.fake_ilink --port N`，让 `hubctl serve` 的 `upstream.base_url` 指向它，再用 `hubctl login` 扫码
-- **THEN** 登录成功，服务能收到假腾讯放进去的消息、能发消息，全程没有访问外网
+- **THEN** 登录成功；用 `POST /_fake/inbox` 放进一条使用者消息，服务收到并交给对应的项目；服务发的消息能从 `GET /_fake/sent` 查到；`POST /_fake/mode` 切到回 -14 后，下一次发消息得到 `failed` / `login_expired`；全程没有访问外网
 
 ### Requirement: 显示时区
 

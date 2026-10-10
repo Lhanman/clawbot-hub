@@ -174,7 +174,9 @@
 
 服务 MUST 有一个凭证监视线程：每 5 秒比较一次 `account.json` 的凭证摘要（见"凭证文件"）和数据库里记的，没绑定时看文件有没有出现。变了就依次：重新读取并换用新凭证；补做"登录成功"里的数据库事务（幂等）；记下新摘要和变化的时刻（`account_state.creds_changed_ms`）；清掉"登录失效"状态，并按 `hub-alerts` 发"已恢复"（如果之前报过失效）；**唤醒收消息线程**，让它马上用新凭证开始新一轮，不等 600 秒的探测间隔或错误退避。服务启动时（读完 `account.json` 之后、开始收消息之前）也做一次同样的比对，所以服务停着时做的 `hubctl login` 在启动时就生效。正在进行的那一次长轮询还在用旧凭证，最迟在它结束（不超过 `upstream.poll_timeout`）后换上新凭证。
 
-收到 -14 时 MUST 先重新读文件：摘要变了就用新凭证重试一次，再决定算不算失效。以下两种情形收到的 -14 不报警，等新凭证换上：`login.pending` 存在且它记的进程还活着、开始不到 20 分钟（正在扫码）；`creds_changed_ms` 在最近 60 秒内。新绑定生效时腾讯会让旧凭证失效，不能因此报一条"假的登录失效"。
+收到 -14 时 MUST 先重新读文件：摘要变了就用新凭证重试一次（只限收消息，发送见下一段），再决定算不算失效。以下两种情形收到的 -14 不报警、不改登录状态，等新凭证换上：`login.pending` 存在且它记的进程还活着、开始不到 20 分钟（正在扫码）；`creds_changed_ms` 在最近 60 秒内。新绑定生效时腾讯会让旧凭证失效，不能因此报一条"假的登录失效"。
+
+**发送途中**收到的 -14 不重试（那一条带的对话凭证属于旧账号，换了新凭证也发不出去）：同样先重新读文件；摘要变了，或者处于上面两种情形之一，这一条和后面的段不发、额度退回，结果是 `failed` / `login_expired`（前面已经发出去的段让整条成为 `partial`），**不改登录状态、不发告警**；都不是才把登录状态置为失效并告警（见"登录失效"）。
 
 #### Scenario: 服务运行中重新扫码
 
@@ -200,6 +202,16 @@
 
 - **WHEN** 凭证 30 秒前刚换过，服务收到一次 -14
 - **THEN** 重新读文件、用新凭证重试一次；重试成功就没有失效；重试仍是 -14 时也不报警（60 秒内），超过 60 秒仍是 -14 才按失效处理
+
+#### Scenario: 换凭证期间发送遇到 -14
+
+- **WHEN** 凭证 30 秒前刚换过（窗口已作废，登录状态正常），一条发送在飞，假上游对 `sendmessage` 回 `ret=-14`
+- **THEN** 这一条 `failed` / `login_expired`，额度退回；假上游对这一条只收到一次请求（不重试）；登录状态仍是正常，没有失效告警
+
+#### Scenario: 发送遇到 -14 时凭证文件已经换了
+
+- **WHEN** `hubctl login` 刚写好新的 `account.json`，监视线程还没来得及换上（5 秒周期内），此时一条发送收到 `-14`
+- **THEN** 同样不改登录状态、不发失效告警，结果 `failed` / `login_expired`；监视线程随后换上新凭证，状态保持正常，没有"失效"和"恢复"的 Bark
 
 ### Requirement: 导入已有的凭证
 
@@ -284,7 +296,7 @@
 访问腾讯接口的请求形式 MUST 可以用配置 `upstream.profile` 切换，默认 `legacy`。收发消息用 `account.json` 里的 `base_url`（没有就用 `upstream.base_url`，默认 `https://ilinkai.weixin.qq.com`）；取二维码、查扫码状态用 `upstream.base_url`（回了 `scaned_but_redirect` 之后改用返回的 `redirect_host`）。
 
 - `legacy`：和 ashare-quant 现在发的请求一致，逐项如下——
-  - 请求头 4 个：`Content-Type: application/json`、`AuthorizationType: ilink_bot_token`、`Authorization: Bearer <bot_token>`、`X-WECHAT-UIN`（随机 uint32 的十进制字符串再 base64，每次请求不同）。
+  - 自定义的请求头恰好这 4 个（`requests` 自己带的 `Host`、`Content-Length`、`Connection`、`User-Agent`、`Accept` 这类传输层的头不算在内，测试不比较）：`Content-Type: application/json`、`AuthorizationType: ilink_bot_token`、`Authorization: Bearer <bot_token>`、`X-WECHAT-UIN`（随机 uint32 的十进制字符串再 base64，每次请求不同）。
   - `getupdates`：`POST <base_url>/ilink/bot/getupdates`，请求体只有 `get_updates_buf` 和 `base_info`；`base_info` 只有 `channel_version: "1.0.2"`。
   - `sendmessage`：`POST <base_url>/ilink/bot/sendmessage`，请求体 `{"msg": {…}, "base_info": {"channel_version": "1.0.2"}}`，`msg` 恰好 7 个字段：`from_user_id`（空字符串）、`to_user_id`、`client_id`（每条一个新的随机值，重试时沿用）、`message_type: 2`、`message_state: 2`、`context_token`、`item_list: [{"type": 1, "text_item": {"text": …}}]`。
   - 取二维码：`GET <base_url>/ilink/bot/get_bot_qrcode?bot_type=3`；查状态：`GET <base_url>/ilink/bot/get_qrcode_status?qrcode=<码>`。
@@ -295,7 +307,7 @@
 #### Scenario: 默认和现在一致
 
 - **WHEN** 用默认配置发一条消息
-- **THEN** 假上游收到的请求头、请求体字段与上面 `legacy` 的清单逐项相同：只有 4 个请求头，`msg` 恰好 7 个字段，`base_info` 只有 `channel_version: "1.0.2"`（`client_id`、`X-WECHAT-UIN` 这类随机值只比格式）
+- **THEN** 假上游收到的请求头、请求体字段与上面 `legacy` 的清单逐项相同：自定义的请求头恰好 4 个（传输层自带的头不比），`msg` 恰好 7 个字段，`base_info` 只有 `channel_version: "1.0.2"`（`client_id`、`X-WECHAT-UIN` 这类随机值只比格式）
 
 #### Scenario: 收消息请求的形式
 

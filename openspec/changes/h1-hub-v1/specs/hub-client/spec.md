@@ -8,17 +8,17 @@
 
 ### Requirement: 单文件、只依赖标准库
 
-客户端 MUST 是仓库里的一个文件 `client/clawbot_hub_client.py`，只 import Python 标准库，在 Python 3.9 及以上能用（别的项目的 Python 版本不一定新），可以整份拷进别的项目里。文件里有常量 `CLIENT_VERSION` 和 `API_VERSION`（字符串 `"1"`，与服务健康检查里的 `api` 字段同一种类型），并有类型标注（不用 3.10 以后才有的语法）。
+客户端 MUST 是仓库里的一个文件 `client/clawbot_hub_client.py`，只 import Python 标准库，在 Python 3.9 及以上能用（别的项目的 Python 版本不一定新），可以整份拷进别的项目里。文件里有常量 `CLIENT_VERSION` 和 `API_VERSION`（字符串 `"1"`，与服务健康检查里的 `api` 字段同一种类型），并有类型标注：文件的第一条语句（文档字符串除外）MUST 是 `from __future__ import annotations`（这样注解里写 `X | None` 在 3.9 上不会求值），并且不用 `match`、`except*`、`dataclass(slots=…)`、`dataclass(kw_only=…)`、`zip(strict=…)` 这类 3.10 以后才有的写法。
 
 #### Scenario: 没有第三方依赖
 
 - **WHEN** 用一个只有标准库的干净环境（测试里用 `python -I -S` 加最小路径）导入这个文件
 - **THEN** 导入成功；文件里所有 `import` 语句涉及的模块都在标准库里（有测试检查）
 
-#### Scenario: 语法兼容 Python 3.9
+#### Scenario: 语法和用法兼容 Python 3.9
 
-- **WHEN** 用 3.9 的语法规则检查这个文件（测试里用 `ast.parse(..., feature_version=(3, 9))`）
-- **THEN** 通过，没有 `match` 语句，也没有运行时求值的 `X | Y` 类型写法
+- **WHEN** 测试用 `ast.parse(..., feature_version=(3, 9))` 检查这个文件，再遍历语法树
+- **THEN** 语法检查通过；第一条语句（文档字符串除外）是 `from __future__ import annotations`；没有 `match` 语句和 `except*`，没有带 `slots=` 或 `kw_only=` 的 `dataclass`，没有带 `strict=` 的 `zip`；注解位置以外没有两边都是名字或 `None` 的 `|`（会在 3.9 上运行时出错的类型写法）
 
 ### Requirement: 接口
 
@@ -168,7 +168,7 @@
 
 - 循环取话；对每一项调用 `handler(item)`，`handler` **正常返回**才把这一项的 `id` 加进确认列表，处理完这一批以后统一调 `ack`；`handler` 抛异常的那一项不确认（记日志，继续处理这一批里后面的），租期过后服务会再给一次；
 - **心跳**：`handler` 运行期间，客户端 MUST 每 `heartbeat_seconds` 秒调一次 `GET /v1/inbox?wait=0&max=0`，让服务知道项目还活着（处理一句慢指令超过 90 秒也不会被判成"没在线"）。`heartbeat_seconds` 不传（`None`）时取 `inbox_online_seconds / 3`（`inbox_online_seconds` 来自 `status()` 的 `service.inbox_online_seconds`，开始循环时取一次，取不到按 90，所以默认是 30 秒）。`handler` 在调用方的线程里运行，心跳由客户端自己起的**后台线程**发：每个 `handler` 开始前启动、结束后（含抛异常）停止，线程用 `threading.Event.wait` 计时，不用 `sleep` 参数；`heartbeat_seconds` 是留给测试用的，传一个很小的数就能在几百毫秒里测完。心跳失败只记日志，不影响处理；
-- 连不上服务（`HubUnavailable`）时退避：5 秒起每次翻倍、最多 60 秒，恢复后重新计；
+- 连不上服务（`HubUnavailable`）时退避：5 秒起每次翻倍、最多 60 秒，恢复后重新计。循环里的取话、确认、心跳**各调用一次就算一次**，调用内部不叠加客户端层的重试（实现上这几次调用用 `retries=0`），所以退避的次数就是失败的调用次数，也是假上游收到的失败请求数；
 - `ack` 失败（`HubUnavailable`）时不能丢掉这一批的待确认 `id`：用同样的退避只重试 `ack`，成功之后才继续取话（服务保证确认是幂等的）；
 - `HubAuthError` 时抛出（密钥不对或项目被停用，重试没有用）；`HubRequestError` 中 429 睡 `retry_after` 秒（没有就 60 秒）后继续，其余抛出；
 - `stop()` 为真时在两次取话之间退出（当前这一批处理完并确认）；
@@ -181,7 +181,7 @@
 
 #### Scenario: 服务重启时退避
 
-- **WHEN** 服务连续 3 次连不上，之后恢复
+- **WHEN** 取话连续 3 次连不上（假上游一共收到 3 次失败的连接尝试），之后恢复
 - **THEN** 退避时间依次是 5、10、20 秒，恢复后取话正常，下一次再失败又从 5 秒开始
 
 #### Scenario: 密钥被停用
@@ -206,7 +206,7 @@
 
 #### Scenario: 确认失败不丢
 
-- **WHEN** 处理完一批后 `ack` 连续两次连不上，第三次成功
+- **WHEN** 处理完一批后 `ack` 连续两次连不上（每次调用只发一次请求），第三次成功
 - **THEN** 同一批的 `id` 一直保留，退避 5、10 秒，第三次确认成功，之后才取下一批；服务那边没有重复交出这批话
 
 #### Scenario: 限速时睡一会儿

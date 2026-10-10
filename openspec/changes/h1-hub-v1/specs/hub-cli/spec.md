@@ -71,13 +71,13 @@
 
 #### Scenario: 配置显示
 
-- **WHEN** 运行 `hubctl config show`，配置里有 Bark 设备码的环境变量
-- **THEN** 显示全部生效的配置项（含默认值），设备码一类的值打码；服务启动之后改过配置文件时，末尾提示"配置文件改过，重启服务才生效"
+- **WHEN** 运行 `hubctl config show`，环境变量 `CLAWBOT_HUB_BARK_KEY` 里有 Bark 设备码
+- **THEN** 显示全部生效的配置项（含默认值）；输出里没有设备码，告警那一行只写"设备码：已配置（环境变量）"、"已配置（bark.json）"或"未配置"；服务启动之后改过配置文件时，末尾提示"配置文件改过，重启服务才生效"
 
 #### Scenario: 告警命令
 
 - **WHEN** 运行 `echo K | hubctl alerts set-key`，再运行 `hubctl alerts test`，假 Bark 服务回 200
-- **THEN** `bark.json` 权限是 0600，输出里没有设备码；测试告警送到，退出码 0
+- **THEN** `bark.json` 权限是 0600，输出里没有设备码；测试告警送到，退出码 0；事件里有一条"Bark 测试成功"的记录
 
 ### Requirement: 看全貌
 
@@ -177,7 +177,7 @@
 
 | 检查项 | 失败时 |
 |---|---|
-| 数据目录存在 | ⚠（第一次运行会自动创建） |
+| 本次运行刚建了数据目录（`<home>` 原来不存在） | ⚠，提示"数据目录是刚建的"（也许 `--home` 指错了） |
 | 数据目录权限是 0700；`account.json`、`bark.json`、`hub.db`、`config.yaml`（存在时）权限是 0600 | ✗ |
 | `account.json` 不存在 | ⚠（还没绑定） |
 | `account.json` 读不出来、缺字段 | ✗ |
@@ -185,10 +185,12 @@
 | 数据库能打开、`PRAGMA integrity_check` 是 ok、版本不比程序新 | ✗ |
 | 服务在不在运行（判法见"公共约定"） | ⚠（没在运行；也许是你有意停的） |
 | 端口被别的程序占着 | ✗，只在服务没在运行时检查（运行时端口是它自己占的） |
-| 配置读得出来、值在合理范围、显示时区认识 | ✗ |
+| 配置读得出来、值在 `design.md` 第 13 节"取值范围"表给的范围内、显示时区认识、`hub.label` 和确认词的格式对 | ✗ |
 | 保底合计加回复保留超过窗口总条数 | ✗，列出各项目的保底 |
 | 某个项目的前缀和 `routing.confirm_words` 或 `hub.label` 冲突 | ✗，指出是哪个前缀 |
-| 没配告警设备码；Bark 拒绝过告警（设备码可能错了） | ⚠ |
+| 没配告警设备码 | ⚠ |
+| 最近一次发 Bark 的结果是被拒绝，之后没有成功发出过一条（设备码可能错了；`hubctl alerts test` 成功也算一次成功），从事件记录里取 | ⚠ |
+| `server.shutdown_seconds` 小于 `send.timeout_seconds` | ⚠，写出两个值（关停时可能等不到最后一条发完） |
 | 残留的 `login.pending`（里面的进程已经不在，或者开始超过 20 分钟） | ⚠ |
 | 磁盘剩余空间不到 100 MB | ⚠ |
 | 最近一次自动备份距今超过 2 天，或没做过 | ⚠ |
@@ -210,6 +212,21 @@
 
 - **WHEN** 没配告警设备码、服务没在运行，其余都正常
 - **THEN** 有两个 ⚠，没有 ✗，退出码 0
+
+#### Scenario: 关停等待比发送总时限短
+
+- **WHEN** 配置 `server.shutdown_seconds` 为 20、`send.timeout_seconds` 为 30，设备码已配好、服务在运行、其余都正常，运行 `hubctl doctor`
+- **THEN** 有一项 ⚠，写出 20 和 30 两个值；没有 ✗，退出码 0
+
+#### Scenario: Bark 拒绝过，换对设备码后警告消失
+
+- **WHEN** 最近一次发 Bark 被拒绝（假 Bark 服务回 `{"code":400}`），运行 `hubctl doctor`；然后 `hubctl alerts set-key` 换成对的设备码，`hubctl alerts test` 成功，再运行 `hubctl doctor`
+- **THEN** 第一次该项是 ⚠，第二次没有这一项警告
+
+#### Scenario: 数据目录是刚建的
+
+- **WHEN** `--home` 指向一个不存在的目录，运行 `hubctl doctor`
+- **THEN** 目录被建出来（权限 0700），有一项 ⚠ 提示数据目录是刚建的；其他检查照常进行
 
 #### Scenario: 服务运行时不报端口被占
 

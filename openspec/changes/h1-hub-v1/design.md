@@ -59,7 +59,7 @@ uvicorn（HTTP 服务，请求在线程池里）
 ```
 src/clawbot_hub/
   config.py        配置：读取、默认值、校验（错误一次列全）
-  clock.py         Clock：now_ms()、sleep()；测试里换假时钟
+  clock.py         Clock：now_ms()、sleep()、wait(condition, timeout)（带超时的等待也走时钟）；测试里换假时钟，`advance()` 让到期的 sleep 和 wait 醒来
   textutil.py      拆条、取标题、NFKC 匹配、脱敏（纯函数，从 ashare-quant 搬）
   db.py            连接（secure_delete、外键、busy_timeout）、事务（BEGIN IMMEDIATE）、迁移执行器
   migrations/      0001_init.sql …
@@ -110,13 +110,13 @@ class Upstream(Protocol):
 | DNS 失败、连接被拒、连接超时、TLS 握手失败 | `Transient` |
 | 收到完整的 HTTP 429 或 5xx 响应（不看响应体，里面带 -14 也一样） | `Transient` |
 | 请求发完之后读超时；连接被对方重置或关闭；响应读到一半断开 | `NoResponse` |
-| HTTP 4xx（429 除外）；业务码非 0 且不是 -14（先取 `ret`，没有再取 `errcode`） | `Rejected` |
-| 业务码是 -14 | `SessionExpired` |
-| HTTP 200 且业务码为空或 0 | `Accepted`（再看有没有消息编号） |
+| HTTP 4xx（429 除外，响应体里没有 -14）；HTTP 状态不是 200 的 2xx / 3xx；业务码非 0 且不是 -14（先取 `ret`，没有再取 `errcode`） | `Rejected` |
+| 业务码是 -14（HTTP 状态不是 429 / 5xx 时才看响应体，4xx 里带 -14 也算） | `SessionExpired` |
+| HTTP 200 且业务码为空或 0（响应体不是 JSON 对象也按"为空"算） | `Accepted`（再看有没有消息编号） |
 
 `sendmessage` **每次用新连接**（请求带 `Connection: close`，或发送专用的 `Session` 不复用连接）：服务端早已关掉的空闲连接，下一次 POST 的常见表现就是"被对端重置"，每天只发几条的服务里这几乎是"每天的第一条"，复用连接会让它被误判成"不知道到没到"。待确认：用假上游主动断开空闲连接复现一次，写进 `test_http_outcomes.py`。
 
-`profiles.py` 决定请求头和 `base_info` 的内容：`legacy` 的期望值直接写在 `hub-login` 里（4 个请求头、`msg` 7 个字段、`channel_version "1.0.2"`），也是 A4 的测试夹具；`official` 补 `iLink-App-Id`、`iLink-App-ClientVersion`、`channel_version 2.4.8`、`bot_agent`，并启动时 / 退出时调 `notifystart` / `notifystop`，取二维码改 `POST`（官方文档里的写法，没有在真账号上验证过，列入真机验证清单）。
+`profiles.py` 决定请求头和 `base_info` 的内容：`legacy` 的期望值直接写在 `hub-login` 里（自定义请求头 4 个，`requests` 自带的传输层头不比；`msg` 7 个字段、`channel_version "1.0.2"`），也是 A4 的测试夹具；`official` 补 `iLink-App-Id`、`iLink-App-ClientVersion`、`channel_version 2.4.8`、`bot_agent`，并启动时 / 退出时调 `notifystart` / `notifystop`，取二维码改 `POST`（官方文档里的写法，没有在真账号上验证过，列入真机验证清单）。
 
 测试用两种假上游：**进程内的**（实现 `Upstream` 协议的小类，快，用于 sender / poller / 额度的组件测试）和 **HTTP 的**（`tests/support/fake_ilink.py`，本机回环上的真 HTTP 服务，也能用 `python -m tests.support.fake_ilink --port N` 独立运行，用于测 `http.py`、两档请求形式、合约测试和 Mac 上的演练）。两种假件各有自己的测试，免得假件写错而上层测试全绿。
 
@@ -166,7 +166,8 @@ CREATE TABLE outbox (                                                -- 发送�
   parts_sent INTEGER NOT NULL DEFAULT 0, parts_unconfirmed INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL,   -- sending|sent|unconfirmed|partial|rejected|failed|skipped|interrupted
   reason_code TEXT, reason TEXT,                                     -- reason：变量已代入的中文原因，不含正文
-  chars INTEGER, no_message_id INTEGER NOT NULL DEFAULT 0,
+  chars INTEGER,
+  no_message_id INTEGER NOT NULL DEFAULT 0,                          -- 这条消息里腾讯没给消息编号的请求数，只用于 status 展示
   created_ms INTEGER NOT NULL, finished_ms INTEGER);
 CREATE UNIQUE INDEX outbox_dedupe ON outbox(project_id, dedupe_hash)
   WHERE dedupe_hash IS NOT NULL
@@ -185,7 +186,8 @@ CREATE INDEX inbox_fetch ON inbox(project_id, state, at_ms);
 CREATE TABLE inbound_seen (upstream_key TEXT PRIMARY KEY, seen_ms INTEGER NOT NULL);
 CREATE TABLE notice_state (key TEXT PRIMARY KEY, last_ms INTEGER NOT NULL);   -- 服务回复的限频：offline:<项目> / disabled:<项目> / full:<项目> / nodefault
 CREATE TABLE alert_state (key TEXT PRIMARY KEY, episode TEXT, last_sent_ms INTEGER,
-  pending_text TEXT, pending_since_ms INTEGER, attempts INTEGER NOT NULL DEFAULT 0);
+  pending_text TEXT, pending_since_ms INTEGER, attempts INTEGER NOT NULL DEFAULT 0,
+  counter INTEGER NOT NULL DEFAULT 0);                               -- send_unconfirmed 用：连续没有确认送达的 sendmessage 请求数，重启保留
 CREATE TABLE events (id INTEGER PRIMARY KEY, ts_ms INTEGER NOT NULL, level TEXT NOT NULL,
   kind TEXT NOT NULL CHECK (kind IN ('login','alert','send','hold','project','queue','backup','lifecycle')),
   project TEXT, detail TEXT);
@@ -203,7 +205,7 @@ CREATE TABLE events (id INTEGER PRIMARY KEY, ts_ms INTEGER NOT NULL, level TEXT 
 
 ### 5. 额度判定
 
-`quota.decide(window, projects, request, cfg) -> Decision` 是纯函数，按 `hub-quota` 里写的顺序判定，输出 `Allow(n)` 或 `Deny(reason_code, 数字)`；原因文字由 `sender` 用同一个模板表生成（`hub-send` 的表）。`quota.reserve(conn, ...)` 是第 6 节那个 `BEGIN IMMEDIATE` 事务的最后一段：读当前窗口和各项目用量 → `decide` → 通过就 `UPDATE usage`，并给这个请求的 `outbox` 行补上预占窗口 W 和对话凭证；不通过就把这一行改成 `rejected` 并写原因码。
+`quota.decide(window, projects, request, cfg) -> Decision` 是纯函数，按 `hub-quota` 里写的顺序判定，输出 `Allow(n)` 或 `Deny(reason_code, 数字)`；原因文字由 `sender` 用同一个模板表生成（`hub-send` 的表）。`quota.reserve(conn, ...)` 是第 6 节那个 `BEGIN IMMEDIATE` 事务的最后一段：读当前窗口和各项目用量 → `decide` → 通过就 `UPDATE usage`，并给这个请求的 `outbox` 行补上预占窗口 W 的编号；不通过就把这一行改成 `rejected` 并写原因码。对话凭证**不写进 `outbox`**：推送在预占事务里从 W 那一行读出、随请求留在内存里，回复从被回复的 `inbox` 行读出（凭证只存在 `windows` 和 `inbox` 两张表里，见 `hub-deploy`）；服务被杀时这一条本来就标"中断"，不需要凭证。
 
 用量的算式（再写一遍，实现按这个）：
 
@@ -235,13 +237,13 @@ pool          = free − reserve_left − Σ unused_g
                  ├─► Accepted(无编号) strict      → unconfirmed
                  │                    observe/off → sent（observe 记 no_message_id）
                  ├─► Rejected                     → 这条没发出去，退回，不重试
-                 ├─► SessionExpired               → 登录置失效，这条和后面的退回
+                 ├─► SessionExpired               → 先重读凭证文件：摘要变了或正在换凭证，就只退回这条和后面的（不改状态、不告警）；否则登录置失效并告警，这条和后面的退回
                  ├─► Transient                    → 同一个 client_id 重试 ≤ retries 次，仍失败则退回
                  └─► NoResponse                   → unconfirmed，不重试，后面的不发
 结束 ─► 汇总各条 → 整条状态 → 写发送记录 → 返回
 ```
 
-**时间预算**：整个调用共用一份 `send.timeout_seconds`（默认 30），从服务开始处理这个 POST 起算，等发送锁和向腾讯发请求都在里面；每次向腾讯发请求的连接和读超时取 `min(upstream.request_timeout, 剩下的预算)`，每一次向腾讯发请求之前（含下一条的第一次尝试和重试）剩不到 1 秒（固定值，见下面的定值表）就不再开始，没开始的那一条算没来得及发（`send_timeout`），重试被拦下的沿用它上一次失败的原因；预算用完：还在等锁的 `failed` / `busy`，已发出在等回话的按读超时算 `unconfirmed`，没开始的退回。服务关闭的等待 `server.shutdown_seconds`（默认 35）比一次发送的上限（30 秒预算）多 5 秒，所以正常关闭时在发的那条一定能发完；还在等锁的请求关闭时马上 `busy` 结束。
+**时间预算**：整个调用共用一份 `send.timeout_seconds`（默认 30），从服务开始处理这个 POST 起算，等发送锁和向腾讯发请求都在里面；每次向腾讯发请求的连接和读超时取 `min(upstream.request_timeout, 剩下的预算)`，每一次向腾讯发请求之前（含下一条的第一次尝试和重试）剩不到 1 秒（固定值，见第 13 节的"固定常量"表）就不再开始，没开始的那一条算没来得及发（`send_timeout`），重试被拦下的沿用它上一次失败的原因；预算用完：还在等锁的 `failed` / `busy`，已发出在等回话的按读超时算 `unconfirmed`，没开始的退回。服务关闭的等待 `server.shutdown_seconds`（默认 35）比一次发送的上限（30 秒预算）多 5 秒，所以正常关闭时在发的那条一定能发完；还在等锁的请求关闭时马上 `busy` 结束。
 
 同一个去重键的并发请求：第二个请求等第一个收尾，最长等自己的预算；第一个在时限内收尾就返回它的结果（`duplicate: true`），否则返回 `unconfirmed` / `duplicate_in_flight`。500 `internal` 时已向腾讯发过请求的记录标 `interrupted`（占着键），重放时对外按 `unconfirmed` / `interrupted` 返回。
 
@@ -255,11 +257,11 @@ pool          = free − reserve_left − Σ unused_g
 
 ### 8. 取话：租约和长轮询
 
-`inbox.fetch(project, wait, max)`：先在事务里把该项目 `queued` 的和 `leased` 且租期已过的记录取出——先把收到已超过保留期的标 `expired`（清正文和凭证），再按 `at_ms`、`rowid` 取最多 `max` 条租出次数（`attempts`）小于 `max_attempts` 的（所以一句话最多被租出 `max_attempts` 次），置 `leased`、`lease_until = now + lease`、`attempts + 1`；没有就在该项目的 `Condition` 上等（超时返回空），`poller` 存入新话以后 `notify`。每次被唤醒和返回之前，都再读一次项目的启用状态，已停用就 403 `project_disabled`。同一项目的新请求会把旧请求唤醒并让它返回空（每个项目记一个"当前等待者"令牌，重启清零）。`max=0` 不租出任何话，立刻返回，只当心跳。
+`inbox.fetch(project, wait, max)`：先在事务里把该项目 `queued` 的和 `leased` 且租期已过的记录取出——先把收到已超过保留期、租期已过（或从没租出去）的标 `expired`（清正文；对话凭证只清从没租出去过的，租出去过的留到句柄失效，见 `hub-inbox`），再按 `at_ms`、`rowid` 取最多 `max` 条租出次数（`attempts`）小于 `max_attempts` 的（所以一句话最多被租出 `max_attempts` 次），置 `leased`、`lease_until = now + lease`、`attempts + 1`；没有就在该项目的 `Condition` 上用 `clock.wait` 等（超时返回空），`poller` 存入新话以后 `notify`。等待分成最长 5 秒一段，每次醒来（被唤醒或一段到点）和返回之前，都再读一次项目的启用状态，已停用就 403 `project_disabled`——`hubctl project disable` 是另一个进程改库，叫不醒这里的 `Condition`，所以挂着的请求最迟 5 秒后结束。同一项目的新请求会把旧请求唤醒并让它返回空（每个项目记一个"当前等待者"令牌，重启清零）。`max=0` 不租出任何话，立刻返回，只当心跳。
 
 **在线**：此刻有它的取话请求挂着（内存里的等待者），或 `last_inbox_ms`（任何取话或确认请求到达、挂着的请求返回时更新）在 `inbox.online_seconds` 之内；已停用 / 只推送的永远不在线。`last_inbox_ms` 在库里，所以重启后仍算数。
 
-超过 `max_attempts` 的话不在取话里作废：每分钟的清理任务处理"租期已过且已租出 `max_attempts` 次"的记录——标 `dropped`、清正文和凭证、写事件。
+超过 `max_attempts` 的话不在取话里作废：每分钟的清理任务处理"租期已过且已租出 `max_attempts` 次"的记录——标 `dropped`、清正文（对话凭证照租出去过的规矩留到句柄失效）、写事件。
 
 ### 9. 回复句柄
 
@@ -282,7 +284,7 @@ pool          = free − reserve_left − Σ unused_g
 
 ### 12. 告警和定时任务
 
-`scheduler` 每 30 秒一轮，里面是一组无状态的小检查（都读数据库和假时钟，所以好测）：清理（每分钟：过期 / 作废的话、7 天前的记录、去重键到期）、窗口快到期、窗口被拒的汇总、腾讯不通时长、告警重试、备份（每天 `backup.at`，失败 10 分钟后重试一次）、心跳（更新 `run.json` 的 `last_heartbeat_ms`）。`alerts` 把"该不该发"和"怎么发"分开：`evaluate(...)` 产出 `Alert(key, episode, text)`，`AlertState` 按 `hub-alerts` 里的去重单位判断发过没有，通过后丢给后台线程发 Bark（立即重试 `alerts.bark_retries` 次，间隔从 1 秒起翻倍；暂时失败的进待发队列，每 `queue_retry_minutes` 分钟重试，`queue_give_up_minutes` 分钟后放弃；Bark 明确拒绝的不重试）。
+`scheduler` 每 30 秒一轮，里面是一组无状态的小检查（都读数据库和假时钟，所以好测）：清理（每分钟：过期 / 作废的话、7 天前的记录、去重键到期）、窗口快到期、窗口被拒的汇总、腾讯不通时长、告警重试、备份（每天 `backup.at`，失败 10 分钟后重试一次）、心跳（更新 `run.json` 的 `last_heartbeat_ms`）。`alerts` 把"该不该发"和"怎么发"分开：`evaluate(...)` 产出 `Alert(key, episode, text)`，`AlertState` 按 `hub-alerts` 里的去重单位判断发过没有，通过后**在同一个事务里**记下去重状态并写入 `pending_text`，再唤醒告警线程；告警线程发 Bark（立即重试 `alerts.bark_retries` 次，间隔从 1 秒起翻倍；暂时失败的仍留在 `pending_text` 里，每 `queue_retry_minutes` 分钟重试，`queue_give_up_minutes` 分钟后放弃；Bark 明确拒绝的不重试），成功后清掉 `pending_text` 并记 `last_sent_ms`；启动时先补发有 `pending_text` 的。所以是至少一次：判定通过之后、Bark 回话之前被杀，重启后补发；Bark 已成功、清除之前被杀，会重复一条。`send_unconfirmed` 的连续次数存在它自己那一行的 `counter` 里，每个 `sendmessage` 请求结束时更新一次。
 
 ### 13. 配置
 
@@ -317,6 +319,36 @@ log:      { level: INFO, max_mb: 5, keep: 5 }
 
 约束：`quota.window_limit` 至少比 `reply_reserve` 大 1；`send.part_chars` 不小于 200；`server.shutdown_seconds` 小于 `send.timeout_seconds` 时只警告（关停时可能等不到最后一条发完）；`server.lan` 与 `server.host` 的关系见 `hub-deploy`；登记、修改、启用项目时检查保底之和加回复保留不超过窗口总条数。配置里把 `window_limit` 改小，和库里已登记的保底冲突：启动**只警告**（事件、`status` 提示、`doctor` 错误），不拒绝启动，`decide` 里的 `max(pool, 0)` 保证这种状态下不会算出负的额度。
 
+**取值范围**（启动校验按这张表，越界的一次列全；表里没有的数值键必须是 1 到 1000000 的整数，布尔键只能是 `true` / `false`）：
+
+| 键 | 范围 |
+|---|---|
+| `server.port` | 1–65535 |
+| `server.shutdown_seconds` | 1–600 |
+| `upstream.poll_timeout` | 5–120 |
+| `upstream.request_timeout` | 1–120 |
+| `upstream.backoff_start`、`upstream.backoff_max` | 1–3600，且 `backoff_max` ≥ `backoff_start` |
+| `upstream.relogin_probe_seconds` | 30–86400 |
+| `send.timeout_seconds` | 2–600 |
+| `send.part_chars` | 200–4000，且 ≤ `send.max_chars` |
+| `send.max_chars` | 200–60000（请求体 64 KiB 的上限可能先起作用，那时是 413 而不是 `text_too_long`） |
+| `send.retries` | 0–5 |
+| `quota.window_hours` | 2–168 |
+| `quota.window_limit` | 2–100 |
+| `quota.reply_reserve` | 0 到 `window_limit − 1` |
+| `quota.deferrable_keep` | 0 到 `window_limit` |
+| `inbox.wait_seconds` | 0 到 `inbox.max_wait` |
+| `inbox.max_wait` | 1–600 |
+| `inbox.max_attempts` | 1–20 |
+| `routing.confirm_seconds` | 1–1800（和接口里 `confirm_seconds` 参数的上限一致） |
+| `reply.handle_minutes` | 1–1440 |
+| `reply.max_per_handle` | 1–20 |
+| `alerts.bark_retries` | 0–10 |
+| `alerts.window_warn.hours_before` | 1 到 `quota.window_hours − 1` |
+| `backup.keep` | 1–365 |
+| `db.busy_timeout_ms` | 100–60000 |
+| `hub.label`、`routing.confirm_words` 的每个词 | 1–8 个字符，只含字母、数字、汉字（与前缀同一套规则） |
+
 **固定常量**（不进配置，写在代码里并各有测试）：
 
 | 常量 | 值 | 为什么固定 |
@@ -331,6 +363,7 @@ log:      { level: INFO, max_mb: 5, keep: 5 }
 | `confirm_seconds` 上限 | 1800 秒 | 防护栏 |
 | 取话 `max` | 默认 10、上限 50；`ack` 一次最多 50 个 | 防护栏 |
 | 扫码 | 最多 5 张，每张最多等 180 秒，每秒查一次，查失败等 2 秒 | 与腾讯的二维码寿命配套 |
+| 取话等待的分段 | 最长 5 秒一段，每段醒来核对一次项目是否仍启用 | 实现细节（`hubctl` 是另一个进程，叫不醒服务里的等待） |
 | 凭证监视 | 每 5 秒；`login.pending` 20 分钟规则；`creds_changed_ms` 60 秒内的 -14 不报警；换上新凭证时唤醒收消息线程 | 实现细节 |
 | 发请求的预算保护 | 剩不到 1 秒，不再向腾讯发（含下一条的第一次尝试和重试） | 与 `upstream.request_timeout` 配套 |
 | 定时任务周期 | 30 秒（心跳同周期，`run.json` 超过 60 秒没更新就当服务没在运行） | 实现细节 |
@@ -384,7 +417,7 @@ log:      { level: INFO, max_mb: 5, keep: 5 }
 - **一号一绑不确定**：→ 设计按"成立"来，只有服务登录；迁移时不重新扫码，用导入。
 - **回复用的对话凭证能用多久不知道**（有用户说只有 1–2 分钟）：→ 回复被拒绝时项目拿到原因；`reply.handle_minutes` 只是服务这边的上限；真机验证项里测。
 - **SQLite 多进程写**（服务 + `hubctl` 管理命令）：→ WAL + `busy_timeout` + 管理命令的写事务都很短。
-- **客户端 Python 3.9 兼容**：→ 不用 3.10 以后的语法（`match`、`X | Y` 类型写法放进字符串注解或用 `typing`），测试里用语法检查工具验证。
+- **客户端 Python 3.9 兼容**：→ 文件第一条语句是 `from __future__ import annotations`（注解里写 `X | None` 才安全），不用 `match`、`except*`、`dataclass(slots=…)`、`zip(strict=…)` 这类 3.10 以后才有的写法；测试用 `ast.parse(..., feature_version=(3, 9))` 查语法，再遍历语法树查上面这几项用法。
 - **服务自己的回复至多一次**：→ 被杀时丢一条"没在线"之类的提醒；话本身已入队，不丢，可接受。
 
 ## Migration Plan
@@ -392,9 +425,9 @@ log:      { level: INFO, max_mb: 5, keep: 5 }
 服务本身是新的，没有数据要迁。要迁的是 ashare-quant 现在的微信凭证和额度状态：
 
 1. 本变更（`h1-hub-v1`）在新仓库里完成，用假上游测通，ashare-quant 一行不动。
-2. Mac 上装服务、绑定到假上游或只做离线检查（`hubctl doctor`），登记 ashare-quant，演练。
+2. Mac 上装服务，**用单独的演练数据目录和端口**（`CLAWBOT_HUB_HOME=~/.clawbot-hub-rehearsal`，launchd 演练用另一个 label），绑定到假上游，登记 ashare-quant，演练；演练完把整个演练目录移走。正式的数据目录里不能有演练遗留（指向假上游的 `account.json`、假窗口、演练登记的项目）。
 3. ashare-quant 里另立一个变更加"走服务"的模式（`wechat.mode: direct | hub`，默认 `direct`），先和 Mac 上未推送的本机提交对齐。
-4. 挑周末：停旧的微信问答任务 → 备份 `data/notify/clawbot.json` → `launchctl bootout` 停掉服务（如果已装）→ `hubctl import-credentials` → 启动服务 → 把 ashare-quant 切到 `hub` → 手动推一条简报、微信里发一句"状态"，两边都收到才算通。
+4. 挑周末：停旧的微信问答任务 → 确认正式数据目录里没有 `account.json` 和演练遗留（有就先移走）→ 备份 `data/notify/clawbot.json` → `launchctl bootout` 停掉服务（如果已装）→ `hubctl import-credentials` → 启动服务 → 把 ashare-quant 切到 `hub` → 手动推一条简报、微信里发一句"状态"，两边都收到才算通。
 5. 出问题就退：停服务，把备份放回去，配置改回 `direct`，重启旧任务（只要中间没重新扫过码，凭证还有效）。
 6. 稳定一段时间后，在 ashare-quant 里删掉直连腾讯的代码（单独一个变更）。
 
@@ -406,5 +439,5 @@ log:      { level: INFO, max_mb: 5, keep: 5 }
 2. 其他项目的情况（几个、在哪台机器、用什么语言、每天推几条）——决定要不要开局域网监听、各项目保底多少。默认值按"ashare-quant 保底 6、第一个其他项目保底 2、回复保留 2"。
 3. 其他项目的前缀叫什么（登记时再定；前缀不能和默认项目自己的指令同名）。
 4. `official` 档位是否值得切换（腾讯服务端有没有开始校验那几个请求头）——真机验证，默认 `legacy`。
-5. 仓库的最终名字和位置（默认 `Lhanman/clawbot-hub`，私有）。
+5. 仓库：已定 `Lhanman/clawbot-hub`，公开仓库（使用者 2026-10-10 确认"公开也行"）；服务代码什么时候开始写、写在哪个分支，等使用者点头。
 6. 长轮询读超时算不算"完成往返"（影响 `upstream_down` 的判断）、带旧的 `get_updates_buf` 再收是否重发同一批消息、launchd 的 `Umask` 对 `launchd.log` 是否生效——真机验证。

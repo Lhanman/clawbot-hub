@@ -107,10 +107,11 @@
 一条消息（含第 2 条起多出来的开头）最多 `send.part_chars`（默认 2000，启动时校验不得小于 200）个字；超了就拆成几条。规则（行为与 ashare-quant 现在的 `split_message` 一致，只多一条标题长度的限制）：
 
 1. 先按"项目标签"把标签加在第一行前面。
-2. 标题取（加了标签以后的）第一行；用在开头里的标题最多取前 30 个字，超出的截断并加"…"。（这是比 ashare-quant 现在多出来的限制：它的消息第一行都很短，没有这个问题；没有它，一行就超长的消息会让开头本身超过上限。）
-3. 第 2 条起每条前面多一行开头 `<标题>（第 i/n 条）`，后面带换行。拆之前先给开头留位置：每条正文的预算 = max(`part_chars` − 开头的字数, `part_chars` 的一半取整)，开头的字数按 `n = quota.window_limit`（最多拆成这么多条）估。
-4. 按这个预算拆全文：优先在换行处断开（换行符留在前一段末尾），一行就超长时才在行中间断，不会把一个字拆开。
-5. 拆成多条时，第 2 条起加上开头。只有一条时没有开头。
+2. 加了标签的全文不超过 `part_chars` 个字的，就是一条，原样发、没有开头，下面的规则不用看。（ashare-quant 也是先按整条上限拆一遍，多于一条才扣掉开头的位置重拆；少了这一步，字数在"`part_chars` 减去开头的字数"和 `part_chars` 之间的消息会被多拆出一条，多占一条额度。）
+3. 标题取（加了标签以后的）第一行；用在开头里的标题最多取前 30 个字，超出的截断并加"…"。（这是比 ashare-quant 现在多出来的限制：它的消息第一行都很短，没有这个问题；没有它，一行就超长的消息会让开头本身超过上限。）
+4. 第 2 条起每条前面多一行开头 `<标题>（第 i/n 条）`，后面带换行。拆之前先给开头留位置：每条正文的预算 = max(`part_chars` − 开头的字数, `part_chars` 的一半取整)，开头的字数按 `n = quota.window_limit`（最多拆成这么多条）估。
+5. 按这个预算拆全文：优先在换行处断开（换行符留在前一段末尾），一行就超长时才在行中间断，不会把一个字拆开。
+6. 拆成多条时，第 2 条起加上开头。
 
 结果：每条（含开头）不超过 `part_chars` 个字；去掉开头以后按顺序拼回等于加了标签的原文。
 
@@ -120,6 +121,16 @@
 
 - **WHEN** 发 1500 个字
 - **THEN** 一条，开头没有"第 1/1 条"
+
+#### Scenario: 全文在上限以内，不扣开头的位置
+
+- **WHEN** 第一行 10 个字、全文 1990 个字（不超过 2000，但超过 2000 减去开头的字数）
+- **THEN** 一条，没有开头，占一条额度；假上游只收到一次请求，文字与发出的一致
+
+#### Scenario: 刚好超过上限
+
+- **WHEN** 第一行 10 个字、全文 2001 个字
+- **THEN** 拆成 2 条，第 2 条有开头；每条（含开头）不超过 2000 个字，去掉开头后拼回等于原文
 
 #### Scenario: 长消息按行拆
 
@@ -182,13 +193,13 @@
 | 业务码是 -14 | 登录失效 | 见 `hub-login`；这一条和后面的都不发，`login_expired` |
 | HTTP 200，`ret` 和 `errcode` 都没有或为 0 | 腾讯接受了 | 再看有没有**消息编号**（返回体里 `send.message_id_keys`，默认 `message_id`、`msg_id` 的任何一个有非空、非 0 的值）：有 → 这一条 `sent`；没有 → 看 `upstream.confirm`：`strict` 时这一条 `unconfirmed`（`no_message_id`），`observe`（默认）和 `off` 时 `sent`。`observe` 额外把"没有消息编号"记进数据库，连续出现会触发告警（见 `hub-alerts`）。这两种情形都继续发后面的条数 |
 
-**总时限。** 预算从服务开始处理这个 POST 起算 `send.timeout_seconds`（默认 30）秒，等发送锁和向腾讯发请求共用这一份。每一次向腾讯发请求，连接超时和读超时都取 `min(upstream.request_timeout, 剩下的预算)`（`upstream.request_timeout` 默认 15 秒）；重试之前剩下不到 1 秒的，不再开始新的尝试。到点时：
+**总时限。** 预算从服务开始处理这个 POST 起算 `send.timeout_seconds`（默认 30）秒，等发送锁和向腾讯发请求共用这一份。每一次向腾讯发请求，连接超时和读超时都取 `min(upstream.request_timeout, 剩下的预算)`（`upstream.request_timeout` 默认 15 秒，所以默认下一次请求最多等 15 秒）。**每一次向腾讯发请求之前（包括下一条的第一次尝试和重试），剩下的预算不足 1 秒（固定值，见 design 的定值表）的，就不再开始**：这一条算"没来得及发"；重试被这条规则拦下时，这一条沿用它上一次失败的原因（例如 `upstream_unreachable`），不改成 `send_timeout`。到点时：
 
 - 还在等发送锁：`failed` / `busy`，预占的条数全部退回（服务正在关闭时，还在等锁的请求也马上这样结束，见 `hub-deploy`）；
 - 某一条已经发出、正在等回话：就是读超时，按上表算 `unconfirmed`（`no_response`）；
-- 还没开始发的条数：退回，算"没来得及发"。
+- 还没开始发的条数：退回，算"没来得及发"，各自的原因码是 `send_timeout`。
 
-**合并。** 整条消息的结果由各条合成：全部 `sent` → `sent`；每一条都是 `sent` 或 `unconfirmed`、至少一条 `unconfirmed` → `unconfirmed`；至少一条 `sent` 或 `unconfirmed`、同时至少一条没发出去（失败或没来得及发）→ `partial`；一条 `sent` 或 `unconfirmed` 都没有 → `failed`（`rejected` 只用于服务自己按规则不发的）。`parts_sent` 是 `sent` 和 `unconfirmed` 的条数之和。`reason_code` 和 `reason` 取**第一个出问题的那一条**的；一条都没来得及发（总时限用完）时是 `send_timeout`；拆成多条且不是全部 `sent` 时，`reason` 末尾加"；发出了 i 条，共 n 条"（与 ashare-quant 一致）。
+**合并。** 整条消息的结果由各条合成：全部 `sent` → `sent`；每一条都是 `sent` 或 `unconfirmed`、至少一条 `unconfirmed` → `unconfirmed`；至少一条 `sent` 或 `unconfirmed`、同时至少一条没发出去（失败或没来得及发）→ `partial`；一条 `sent` 或 `unconfirmed` 都没有 → `failed`（`rejected` 只用于服务自己按规则不发的）。`parts_sent` 是 `sent` 和 `unconfirmed` 的条数之和。`reason_code` 和 `reason` 取**第一个出问题的那一条**的：没来得及发的条数排在已经发出的条数后面，所以前面的条数都 `sent` 而后面的没来得及发时，整条的原因码就是 `send_timeout`（原因写"发送超过 N 秒还没发完，后面的 m 条没有发"）；拆成多条且不是全部 `sent` 时，`reason` 末尾加"；发出了 i 条，共 n 条"（与 ashare-quant 一致）。
 
 #### Scenario: 腾讯接受但没有消息编号，严格档
 
@@ -240,6 +251,11 @@
 - **WHEN** 假上游收完请求就断开连接，没有任何回话
 - **THEN** 同样是 `unconfirmed` / `no_response`，只收到一次请求，没有重发
 
+#### Scenario: 每次用新连接，旧的空闲连接不碍事
+
+- **WHEN** 第一条发送成功后，假上游把那条空闲的连接关掉（模拟对方的保活超时），项目随后又发一条
+- **THEN** 第二条是 `sent`，假上游对它只收到一次请求，没有被误判成 `unconfirmed`；假上游记录显示两次请求来自两条不同的连接
+
 #### Scenario: 多条里中途失败
 
 - **WHEN** 拆成 3 条，第 1 条成功，第 2 条回 `ret: 40001`
@@ -255,15 +271,25 @@
 - **WHEN** 第 1 条成功，第 2 条回 `ret: -14`
 - **THEN** `partial`，原因码 `login_expired`；登录状态变成失效，之后的发送直接 `failed` / `login_expired`
 
+#### Scenario: 单次请求默认最多等 15 秒
+
+- **WHEN** 配置都是默认值，假上游收到请求后 20 秒（假时钟）才回话
+- **THEN** 15 秒时读超时，这一条是 `unconfirmed` / `no_response`；假上游只收到一次请求，没有重发
+
 #### Scenario: 总时限用完前一条没来得及开始
 
-- **WHEN** 拆成 2 条，第 1 条（假时钟）花了 29.5 秒才成功，`send.timeout_seconds` 是 30
-- **THEN** 第 2 条不开始：`partial`、`parts_sent` 1、原因码 `send_timeout`；第 2 条的额度退回
+- **WHEN** `upstream.request_timeout` 配成 30，`send.timeout_seconds` 是 30；拆成 2 条，第 1 条（假时钟）花了 29.5 秒才成功
+- **THEN** 第 2 条不开始（剩下 0.5 秒，不足 1 秒）：`partial`、`parts_sent` 1、原因码 `send_timeout`；第 2 条的额度退回，假上游只收到一次请求
 
 #### Scenario: 总时限卡在回话上
 
-- **WHEN** 拆成 3 条，假上游每次回话要 20 秒（假时钟），`send.timeout_seconds` 是 30
-- **THEN** 第 1 条 `sent`；第 2 条的读超时只剩 10 秒，到点算 `unconfirmed`（`no_response`）；第 3 条没发，额度退回；整条 `partial`、`parts_sent` 2
+- **WHEN** `upstream.request_timeout` 配成 25，`send.timeout_seconds` 是 30；拆成 3 条，假上游每次回话要 20 秒（假时钟）
+- **THEN** 第 1 条 20 秒时 `sent`；第 2 条的读超时只剩 10 秒（`min(25, 10)`），到点算 `unconfirmed`（`no_response`）；第 3 条没发，额度退回；整条 `partial`、`parts_sent` 2，原因码 `no_response`
+
+#### Scenario: 重试被预算拦下
+
+- **WHEN** `send.timeout_seconds` 配成 3，假上游拒绝连接，第一次尝试（假时钟）用掉 2.5 秒
+- **THEN** 重试之前剩下 0.5 秒，不足 1 秒，不再重试：`failed` / `upstream_unreachable`（不是 `send_timeout`），假上游只收到一次连接尝试；额度退回
 
 #### Scenario: 等发送锁等到预算用完
 
@@ -300,7 +326,7 @@
 | `send_timeout` | partial / failed | 发送超过 `<N>` 秒还没发完，后面的 `<m>` 条没有发 |
 | `busy` | failed | 服务正忙，这条没有发，稍后再试 |
 | `interrupted` | unconfirmed（只在重放去重结果时） | 上次发送被中断，不知道发出了几条，不要重发 |
-| `duplicate_in_flight` | unconfirmed（只在重放去重结果时） | 同一个去重键的上一次发送还没结束，先不要重发 |
+| `duplicate_in_flight` | unconfirmed（只在重放去重结果时；只有上一次的发送线程超出自己的预算还没收尾才会出现） | 同一个去重键的上一次发送还没结束，先不要重发 |
 
 时间一律按配置的显示时区（`display.timezone`，默认 `Asia/Shanghai`）写，格式 `M月D日 HH:MM`。"24 小时""10 条"按配置里实际的窗口长度和总条数写。
 
@@ -365,13 +391,18 @@
 
 #### Scenario: 内部出错也占着键
 
-- **WHEN** 发送的第 2 条途中服务内部出错（测试里注入），项目用同一个键再发
-- **THEN** 第二次同样是 `unconfirmed` / `interrupted`；如果出错发生在碰腾讯之前，则键已释放，第二次当成新的发送
+- **WHEN** 发送的第 2 条途中服务内部出错（测试里注入，此时第 1 条已经发给假上游），项目用同一个键再发
+- **THEN** 第一次返回 500 `internal`；第二次是 `unconfirmed` / `interrupted`，`duplicate: true`，假上游没有收到新的请求
 
-#### Scenario: 第一次卡住，第二个请求等不到
+#### Scenario: 碰腾讯之前出错，键已释放
 
-- **WHEN** 第一次发送卡在腾讯那边，第二个同键请求等了自己的 `send.timeout_seconds`
-- **THEN** 第二个返回 `unconfirmed` / `duplicate_in_flight`，不占条数，不碰腾讯
+- **WHEN** 发送在碰腾讯之前就内部出错（测试里在预占之后、第一次向假上游发请求之前注入），项目用同一个键再发
+- **THEN** 第一次返回 500 `internal`，预占的条数全部退回；第二次当成新的发送，正常发出
+
+#### Scenario: 第一次的发送线程卡住，第二个请求等不到
+
+- **WHEN** 第一次发送的线程超出了它自己的预算（测试里让它阻塞在发送锁里、不受超时约束），第二个同键请求等了自己的 `send.timeout_seconds`
+- **THEN** 第二个返回 `unconfirmed` / `duplicate_in_flight`，`duplicate: true`，不占条数，不碰腾讯
 
 #### Scenario: 重放带的是现在的余量
 
@@ -389,7 +420,7 @@
 
 - 用被回复那条消息的对话凭证发；
 - 条数记在"回复"一类里，优先于推送（见 `hub-quota`）；
-- `awaiting_confirmation: true` 表示这句回复在等使用者回"对"之类的确认话，服务据此把之后短短的确认话交给这个项目（见 `hub-inbox`）。结果的 `parts_sent` 至少 1（`sent`、`unconfirmed`、`partial`）时记下等待——拿不准有没有到时，多记比漏记安全，标记最多留 `confirm_seconds`；`rejected`、`failed`、`skipped` 不记。另外，如果在被回复的那句话之后，这个项目又收到过新的话，也不记（项目自己已经在处理新话了）。
+- `awaiting_confirmation: true` 表示这句回复在等使用者回"对"之类的确认话，服务据此把之后短短的确认话交给这个项目（见 `hub-inbox`）。结果的 `parts_sent` 至少 1（`sent`、`unconfirmed`、`partial`）时记下等待——拿不准有没有到时，多记比漏记安全，标记最多留 `confirm_seconds`；`rejected`、`failed`、`skipped` 不记。另外，如果在被回复的那句话之后，这个项目又收到过新的话，也不记（项目自己已经在处理新话了；"之后"按 `(at_ms, 入库先后)` 比较，与取话的排序一致，见 `hub-inbox`）。
 
 句柄找不到、属于别的项目：404 `unknown_handle`（两种情况一模一样）；句柄过期（见 `hub-inbox`）：410 `handle_expired`；同一个句柄成功回复（`parts_sent` ≥ 1）满 `reply.max_per_handle`（默认 5）次以后再回复，429 `reply_limit`；被拒绝或失败的回复不占次数。
 
@@ -458,14 +489,15 @@
 
 | HTTP | `error.code` | 什么时候 | 规定在 |
 |---|---|---|---|
-| 400 | `bad_request` | 请求体不是合法 JSON、字段类型不对、枚举值不认识、`dedupe_key` 长度不对、`wait` / `max` / `confirm_seconds` 越界或不是整数 | 各处 |
+| 400 | `bad_request` | 请求体不是合法 JSON、字段类型不对（框架自带的 422 校验失败一律改成这个）、枚举值不认识、`dedupe_key` 长度不对、`wait` / `max` 为负数或不是整数（超过上限的是截断，不是错误，见 `hub-inbox`）、`confirm_seconds` 超过 1800 或不是正整数 | 各处 |
 | 400 | `empty_text` | 文字去掉首尾空白后为空 | `hub-send` |
 | 400 | `text_too_long` | 文字超过 `send.max_chars` | `hub-send` |
 | 401 | `unauthorized` | 没带密钥、格式不对、认不出来 | `hub-projects` |
 | 403 | `project_disabled` | 项目已停用 | `hub-projects` |
 | 403 | `push_only` | 只推送的项目调了取话 | `hub-inbox` |
 | 404 | `unknown_handle` | 回复句柄不存在或不属于调用方 | `hub-inbox` |
-| 404 | `not_found` | 路径不存在 | `hub-send` |
+| 404 | `not_found` | 路径不存在（路径末尾多一个斜杠也是不存在，不做重定向） | `hub-send` |
+| 405 | `method_not_allowed` | 路径存在但用错了方法（例如 `GET /v1/messages`），带 `Allow` 响应头 | `hub-send` |
 | 410 | `handle_expired` | 回复句柄过期 | `hub-inbox` |
 | 413 | `too_large` | 请求体超过 64 KiB | `hub-projects` |
 | 429 | `rate_limited` | 每分钟请求太多 | `hub-projects` |
@@ -482,6 +514,11 @@
 
 - **WHEN** 项目发了一个不是 JSON 的请求体 / 请求一个不存在的路径
 - **THEN** 前者 400，后者 404，正文都是 `{"error": {"code": …, "message": …}}`，message 里没有请求内容
+
+#### Scenario: 框架自带的错误也是同一个格式
+
+- **WHEN** 项目 `GET /v1/messages`（用错方法）；`POST /v1/messages` 的 `text` 写成数字；请求 `/v1/messages/`（多一个斜杠）
+- **THEN** 依次是 405 `method_not_allowed`（带 `Allow: POST`）、400 `bad_request`（不是 422）、404 `not_found`（没有 307 重定向）；正文都是 `{"error": {"code": …, "message": …}}`
 
 #### Scenario: 限速带等待时间
 

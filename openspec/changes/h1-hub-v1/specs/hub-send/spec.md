@@ -104,7 +104,7 @@
 
 ### Requirement: 拆条
 
-一条消息（含第 2 条起多出来的开头）最多 `send.part_chars`（默认 2000，启动时校验不得小于 200）个字；超了就拆成几条。规则（行为与 ashare-quant 现在的 `split_message` 一致，只多一条标题长度的限制）：
+一条消息（含第 2 条起多出来的开头）最多 `send.part_chars`（默认 2000，启动时校验不得小于 200）个字；超了 MUST 拆成几条。规则（行为与 ashare-quant 现在的 `split_message` 一致，只多一条标题长度的限制）：
 
 1. 先按"项目标签"把标签加在第一行前面。
 2. 加了标签的全文不超过 `part_chars` 个字的，就是一条，原样发、没有开头，下面的规则不用看。（ashare-quant 也是先按整条上限拆一遍，多于一条才扣掉开头的位置重拆；少了这一步，字数在"`part_chars` 减去开头的字数"和 `part_chars` 之间的消息会被多拆出一条，多占一条额度。）
@@ -303,7 +303,7 @@
 
 ### Requirement: 原因代码和原文
 
-被服务拒绝、没发出去或没确认的，`reason_code` 和 `reason` 必须是下表里的（`<…>` 是变量）。前四条与 ashare-quant 现在的文字一致，这样项目 Bark 末尾写的原因不变；`login_expired` 只把命令名从 `aq wechat login` 换成 `hubctl login`。
+被服务拒绝、没发出去或没确认的，`reason_code` 和 `reason` MUST 是下表里的（`<…>` 是变量）。前四条与 ashare-quant 现在的文字一致，这样项目 Bark 末尾写的原因不变；`login_expired` 只把命令名从 `aq wechat login` 换成 `hubctl login`。
 
 | reason_code | 出现在 | reason |
 |---|---|---|

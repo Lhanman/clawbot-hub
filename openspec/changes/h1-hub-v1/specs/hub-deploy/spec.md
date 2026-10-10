@@ -126,7 +126,9 @@
 
 ### Requirement: 配置
 
-配置文件 `<home>/config.yaml` 可以没有，全部项都有默认值；只在服务启动时读一次。校验 MUST 一次列出全部错误：数值在合理范围（条数、秒数、端口）、枚举值认识（`upstream.profile` 是 `legacy` 或 `official`，`upstream.confirm` 是 `strict`、`observe`、`off`）、`routing.confirm_words` 不为空、显示时区认识、`quota.window_limit` 至少比 `quota.reply_reserve` 大 1、`server.lan` 与 `server.host` 的关系（见"谁能连"）。
+配置文件 `<home>/config.yaml` 可以没有，全部项都有默认值；只在服务启动时读一次。校验 MUST 一次列出全部错误：数值在合理范围（条数、秒数、端口）、枚举值认识（`upstream.profile` 是 `legacy` 或 `official`，`upstream.confirm` 是 `strict`、`observe`、`off`）、`routing.confirm_words` 不为空、显示时区认识、`quota.window_limit` 至少比 `quota.reply_reserve` 大 1、`send.part_chars` 不小于 200（再小的话，标题和开头占掉大半，一条里放不下正文）、`server.lan` 与 `server.host` 的关系（见"谁能连"）。
+
+`server.shutdown_seconds` 小于 `send.timeout_seconds` 时**只警告**、不拒绝启动（写一条事件，`hubctl doctor` 报告）：这样关停时可能等不到最后一条发完，下次启动那条记录会是"中断"。
 
 校验配置时数据库还没打开，所以"已登记项目的保底合计加回复保留不超过窗口总条数"不在这一步查：启动时发现超了（比如配置里把窗口总条数改小了），MUST 只警告，不拒绝启动——写一条事件，`hubctl status` 提示，`hubctl doctor` 报错；登记、修改、启用项目时才拒绝（见 `hub-projects`）。额度判定里的 `max(pool, 0)` 保证这种状态下不会算出负的额度。腾讯的地址有两处来源：收发消息用 `account.json` 里的 `base_url`（没有就用 `upstream.base_url`），取二维码和查扫码状态用 `upstream.base_url`（遇到 `scaned_but_redirect` 时用返回的 `redirect_host`）。
 
@@ -139,6 +141,16 @@
 
 - **WHEN** 已登记保底合计 8 的项目，配置把 `quota.window_limit` 改成 8，重启
 - **THEN** 服务正常启动，事件里有警告；`hubctl status` 提示、`hubctl doctor` 报错；再登记新项目被拒绝，现有项目照常发送
+
+#### Scenario: 一条里放不下正文
+
+- **WHEN** 配置里 `send.part_chars` 写成 150
+- **THEN** 校验报错（连同其他错误一次列出），退出码 1，没有监听端口；写成 200 时通过
+
+#### Scenario: 关停等待比发送总时限短
+
+- **WHEN** 配置 `server.shutdown_seconds` 为 20，`send.timeout_seconds` 为 30
+- **THEN** 服务正常启动，事件里有警告，`hubctl doctor` 报告这一条
 
 #### Scenario: 腾讯地址的来源
 
@@ -181,7 +193,7 @@
 #### Scenario: 上次被杀
 
 - **WHEN** 上一次的 `run.json` 里 `clean_exit` 不是真，并且库里有一条标着"发送中"的记录，启动
-- **THEN** 记录变成"中断"，启动后发一条 `service_restarted` 告警，然后才开始监听和收消息
+- **THEN** 记录变成"中断"，预占的条数保留；`service_restarted` 告警登记进待发队列，启动完成后由告警线程发出（一次）；告警发不发得出去都不拖慢监听和收消息（Bark 不通时，端口照常在几秒内开始监听）
 
 #### Scenario: 端口被占时前面几步已经做完
 
@@ -194,7 +206,7 @@
 
 - 停止接受新请求（新请求 503 `shutting_down`）；
 - 还在等发送锁、没开始向腾讯发的发送请求马上以 `failed` / `busy` 结束，预占的条数退回；
-- 正在向腾讯发的那一条发完，最多等 `server.shutdown_seconds`（默认 35 秒，比一次发送的总时限 30 秒多 5 秒，所以正常情况下一定发得完）；到点还没发完就强行退出，这条记录下次启动时标成"中断"；
+- 正在向腾讯发的那一条发完，最多等 `server.shutdown_seconds`（默认 35 秒，比一次发送的总时限 30 秒多 5 秒，所以默认配置下一定发得完）；到点还没发完就强行退出（退出码 1，`run.json` 不记"正常退出"），这条记录下次启动时标成"中断"，并按"上次被杀"发 `service_restarted` 告警；
 - 正在等待的取话请求马上返回空列表；
 - `official` 档下调 `notifystop`；
 - 写 `run.json` 的"正常退出"标记；释放锁；退出码 0。
@@ -217,7 +229,7 @@
 #### Scenario: 关闭时间用完
 
 - **WHEN** 一条发送卡在腾讯那边超过 `server.shutdown_seconds`（假时钟）
-- **THEN** 服务强行退出；下次启动这条记录是"中断"，预占的条数保留
+- **THEN** 服务强行退出，退出码 1，`run.json` 不记"正常退出"；下次启动这条记录是"中断"，预占的条数保留，并发一条 `service_restarted` 告警
 
 ### Requirement: 数据库和升级
 

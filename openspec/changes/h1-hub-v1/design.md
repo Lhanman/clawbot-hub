@@ -41,7 +41,7 @@ uvicorn（HTTP 服务，请求在线程池里）
 │ poller ──► upstream(收消息用 Session).get_updates ──► router ──► inbox   │
 │                          └──► replier 队列                               │
 │ replier（服务自己的回复，单独的线程）──► sender                           │
-│ watcher（每 5 秒比对凭证摘要）                                            │
+│ watcher（每 5 秒比对凭证摘要，变了就唤醒 poller）                         │
 │ scheduler（每 30 秒一次）──► 清理、窗口提醒、不通判断、备份、心跳         │
 │ alerts（后台线程）──► Bark                                               │
 │ 全部状态在 SQLite（WAL）里；凭证在 account.json                           │
@@ -129,8 +129,10 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);       -- schema_v
 CREATE TABLE account_state (                                         -- 一行；表按单账号设计，多号时再加列
   id INTEGER PRIMARY KEY CHECK (id = 1),
   login_state TEXT NOT NULL,            -- ok | expired | missing | broken
-  login_since_ms INTEGER, expired_episode INTEGER NOT NULL DEFAULT 0,
+  login_since_ms INTEGER,               -- 进入当前 login_state 的时刻
+  expired_episode INTEGER NOT NULL DEFAULT 0,
   creds_digest TEXT,                    -- bot_token、base_url、bot_id、user_id 四项的摘要
+  creds_changed_ms INTEGER,             -- 服务最近一次发现摘要变了的时刻（60 秒内的 -14 不报警靠它）
   last_upstream_ok_ms INTEGER,          -- 最近一次与腾讯完成往返（upstream_down 的依据）
   last_poll_ok_ms INTEGER, last_poll_error TEXT, last_poll_error_ms INTEGER,
   ignored_count INTEGER NOT NULL DEFAULT 0);
@@ -149,7 +151,8 @@ CREATE TABLE projects (
 CREATE UNIQUE INDEX one_default ON projects(is_default) WHERE is_default = 1;
 CREATE TABLE windows (                                               -- 每个使用者的新消息一行
   id INTEGER PRIMARY KEY AUTOINCREMENT, started_ms INTEGER NOT NULL,
-  context_token TEXT,                                                -- 窗口过期或被新窗口取代时置空
+  context_token TEXT,                                                -- 窗口过期、被新窗口取代或作废时置空
+  voided INTEGER NOT NULL DEFAULT 0,                                 -- 1 = 重新绑定账号时作废：不算开着，也不算最近一条消息
   blocked_until_ms INTEGER, blocked_code TEXT);                      -- 腾讯拒绝后的暂停
 CREATE TABLE usage (                                                 -- 窗口里各项目已用条数（含预占）
   window_id INTEGER NOT NULL, project_id INTEGER NOT NULL,
@@ -180,7 +183,7 @@ CREATE TABLE inbox (
   replies INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX inbox_fetch ON inbox(project_id, state, at_ms);
 CREATE TABLE inbound_seen (upstream_key TEXT PRIMARY KEY, seen_ms INTEGER NOT NULL);
-CREATE TABLE notice_state (key TEXT PRIMARY KEY, last_ms INTEGER NOT NULL);   -- 服务回复的限频：offline:<项目> / disabled:<项目> / nodefault
+CREATE TABLE notice_state (key TEXT PRIMARY KEY, last_ms INTEGER NOT NULL);   -- 服务回复的限频：offline:<项目> / disabled:<项目> / full:<项目> / nodefault
 CREATE TABLE alert_state (key TEXT PRIMARY KEY, episode TEXT, last_sent_ms INTEGER,
   pending_text TEXT, pending_since_ms INTEGER, attempts INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE events (id INTEGER PRIMARY KEY, ts_ms INTEGER NOT NULL, level TEXT NOT NULL,
@@ -200,7 +203,7 @@ CREATE TABLE events (id INTEGER PRIMARY KEY, ts_ms INTEGER NOT NULL, level TEXT 
 
 ### 5. 额度判定
 
-`quota.decide(window, projects, request, cfg) -> Decision` 是纯函数，按 `hub-quota` 里写的顺序判定，输出 `Allow(n)` 或 `Deny(reason_code, 数字)`；原因文字由 `sender` 用同一个模板表生成（`hub-send` 的表）。`quota.reserve(conn, ...)` 在一个 `BEGIN IMMEDIATE` 事务里：读当前窗口和各项目用量 → `decide` → 通过就 `UPDATE usage` 并插入 `outbox`（状态 `sending`，记下预占窗口 W 和对话凭证）。
+`quota.decide(window, projects, request, cfg) -> Decision` 是纯函数，按 `hub-quota` 里写的顺序判定，输出 `Allow(n)` 或 `Deny(reason_code, 数字)`；原因文字由 `sender` 用同一个模板表生成（`hub-send` 的表）。`quota.reserve(conn, ...)` 在一个 `BEGIN IMMEDIATE` 事务里：读当前窗口和各项目用量 → `decide` → 通过就 `UPDATE usage`，并给这个请求的 `outbox` 行（第 6 节开头已经插好，状态 `sending`）补上预占窗口 W 和对话凭证；不通过就把这一行改成 `rejected` 并写原因码。
 
 用量的算式（再写一遍，实现按这个）：
 
@@ -221,8 +224,10 @@ pool          = free − reserve_left − Σ unused_g
 
 检查顺序（`hub-send` 里有同样的表）：校验正文和字段 → 去重键 → `too_long`（拆出的条数超过 L−R 或回复的 L）→ 登录状态（`login_*`，不看 `on_closed`）→ 窗口关着（`on_closed: skip` 则 `skipped`，否则 `rejected`）→ 推送处于暂停期（`upstream_blocked`）→ `quota.decide` → 预占 → 拿发送锁 → 逐条发。
 
+**发送记录什么时候插入**：字段校验通过、拆完条（纯计算，没有副作用）以后，**先插 `outbox` 行**（状态 `sending`，带 `dedupe_key` 的同时占键；撞上部分唯一索引就是键被占着，走下面"同一个去重键的并发请求"，所以去重命中先于 `too_long`）。之后每一步检查不通过，都把这一行改成 `rejected` / `failed` / `skipped` 并写原因码，键随之释放。所以被拒绝的请求也留一行记录（`window_blocked` 汇总数的就是这些行），两个同键请求不会同时通过去重检查。
+
 ```
-请求 ──► 校验 ──► 去重键占位 ──► 登录/窗口/暂停 ──► 判定额度 ──► 预占 ──► 拿发送锁
+请求 ──► 校验 ──► 拆条、插发送记录(占键) ──► 登录/窗口/暂停 ──► 判定额度 ──► 预占 ──► 拿发送锁
                        │ 命中                │ 拒绝/跳过             │ 等锁到时限、或服务在关闭
                        ▼                     ▼                      ▼
              返回原结果(duplicate)    rejected / skipped    退回预占，failed(busy)
@@ -236,7 +241,7 @@ pool          = free − reserve_left − Σ unused_g
 结束 ─► 汇总各条 → 整条状态 → 写发送记录 → 返回
 ```
 
-**时间预算**：整个调用共用一份 `send.timeout_seconds`（默认 30），从服务开始处理这个 POST 起算，等发送锁和向腾讯发请求都在里面；每次向腾讯发请求的连接和读超时取 `min(upstream.request_timeout, 剩下的预算)`，重试之前剩不到 1 秒就不再开始新的尝试；预算用完：还在等锁的 `failed` / `busy`，已发出在等回话的按读超时算 `unconfirmed`，没开始的退回。服务关闭的等待 `server.shutdown_seconds`（默认 35）比一次发送的上限（30 秒预算）多 5 秒，所以正常关闭时在发的那条一定能发完；还在等锁的请求关闭时马上 `busy` 结束。
+**时间预算**：整个调用共用一份 `send.timeout_seconds`（默认 30），从服务开始处理这个 POST 起算，等发送锁和向腾讯发请求都在里面；每次向腾讯发请求的连接和读超时取 `min(upstream.request_timeout, 剩下的预算)`，每一次向腾讯发请求之前（含下一条的第一次尝试和重试）剩不到 1 秒（固定值，见下面的定值表）就不再开始，没开始的那一条算没来得及发（`send_timeout`），重试被拦下的沿用它上一次失败的原因；预算用完：还在等锁的 `failed` / `busy`，已发出在等回话的按读超时算 `unconfirmed`，没开始的退回。服务关闭的等待 `server.shutdown_seconds`（默认 35）比一次发送的上限（30 秒预算）多 5 秒，所以正常关闭时在发的那条一定能发完；还在等锁的请求关闭时马上 `busy` 结束。
 
 同一个去重键的并发请求：第二个请求等第一个收尾，最长等自己的预算；第一个在时限内收尾就返回它的结果（`duplicate: true`），否则返回 `unconfirmed` / `duplicate_in_flight`。500 `internal` 时已向腾讯发过请求的记录标 `interrupted`（占着键），重放时对外按 `unconfirmed` / `interrupted` 返回。
 
@@ -246,11 +251,11 @@ pool          = free − reserve_left − Σ unused_g
 
 `router.route(text, has_text, snapshot, now) -> Route` 是纯函数，`snapshot` 是项目表（启用、是否默认、前缀、在线、等确认）的快照，返回 `ToProject(project, text, via)` 或 `HubReply(kind, args)`，不碰数据库。前缀匹配把输入和每个前缀都做 NFKC + 小写再比较，只在"前缀后面是分隔符或到结尾"时命中，命中以后连续的分隔符全部剥掉；交给项目的文字从**原始字符串**里按匹配到的长度切（NFKC 在前缀这一小段上长度可能变，所以逐字符对齐匹配，不整句规范化），再去首尾空白。"服务"这个指令词和前缀的禁用词都取 `hub.label`。
 
-路由之后由 poller 做两件事：目标项目不在线（`hub-projects` 的定义）时入队的同时加一条"没在线"提醒；"没有默认项目""项目已停用""没在线"三种提示用 `notice_state` 限频（同一种、同一个目标在 `inbox.offline_notice_seconds` 内最多一条，重启不清零）。
+路由之后由 poller 做两件事：目标项目不在线（`hub-projects` 的定义）时入队的同时加一条"没在线"提醒；"没有默认项目""项目已停用""没在线""队列满了"四种提示用 `notice_state` 限频（同一种、同一个目标在 `inbox.offline_notice_seconds` 内最多一条，重启不清零）。
 
 ### 8. 取话：租约和长轮询
 
-`inbox.fetch(project, wait, max)`：先在事务里把该项目 `queued` 的和 `leased` 且租期已过的记录取出——先把收到已超过保留期的标 `expired`（清正文和凭证），再按 `at_ms`、`rowid` 取最多 `max` 条没超过 `max_attempts` 的，置 `leased`、`lease_until = now + lease`、`attempts + 1`；没有就在该项目的 `Condition` 上等（超时返回空），`poller` 存入新话以后 `notify`。每次被唤醒和返回之前，都再读一次项目的启用状态，已停用就 403 `project_disabled`。同一项目的新请求会把旧请求唤醒并让它返回空（每个项目记一个"当前等待者"令牌，重启清零）。`max=0` 不租出任何话，立刻返回，只当心跳。
+`inbox.fetch(project, wait, max)`：先在事务里把该项目 `queued` 的和 `leased` 且租期已过的记录取出——先把收到已超过保留期的标 `expired`（清正文和凭证），再按 `at_ms`、`rowid` 取最多 `max` 条租出次数（`attempts`）小于 `max_attempts` 的（所以一句话最多被租出 `max_attempts` 次），置 `leased`、`lease_until = now + lease`、`attempts + 1`；没有就在该项目的 `Condition` 上等（超时返回空），`poller` 存入新话以后 `notify`。每次被唤醒和返回之前，都再读一次项目的启用状态，已停用就 403 `project_disabled`。同一项目的新请求会把旧请求唤醒并让它返回空（每个项目记一个"当前等待者"令牌，重启清零）。`max=0` 不租出任何话，立刻返回，只当心跳。
 
 **在线**：此刻有它的取话请求挂着（内存里的等待者），或 `last_inbox_ms`（任何取话或确认请求到达、挂着的请求返回时更新）在 `inbox.online_seconds` 之内；已停用 / 只推送的永远不在线。`last_inbox_ms` 在库里，所以重启后仍算数。
 
@@ -258,7 +263,7 @@ pool          = free − reserve_left − Σ unused_g
 
 ### 9. 回复句柄
 
-`rh_` + `secrets.token_urlsafe(16)`（16 字节，22 个字符），存在 `inbox.handle`（唯一）。回复时按句柄查记录，先核对项目（不属于该项目和不存在返回同一个 404），再核对有效期 `min(received_ms + handle_minutes, at_ms + window_hours)` 和话的状态（过期、作废、重新登录之后的都是 410），再看 `replies < max_per_handle`。`hubctl login` 成功时在同一个事务里把所有 `inbox.context_token` 置空。清理任务在句柄失效后把 `context_token` 置空；有效期的判断本身按时间现算，不依赖清理任务。
+`rh_` + `secrets.token_urlsafe(16)`（16 字节，22 个字符），存在 `inbox.handle`（唯一）。回复时按句柄查记录，先核对项目（不属于该项目和不存在返回同一个 404），再核对有效期 `min(received_ms + handle_minutes, at_ms + window_hours)` 和话的状态（过期、作废、重新登录之后的都是 410），再看 `replies < max_per_handle`。重新绑定账号时（`hubctl login` 写好新凭证之后，或者服务发现凭证摘要变了），在一个数据库事务里把所有窗口作废（`windows.voided = 1`、`context_token` 置空）并把所有 `inbox.context_token` 置空；这个事务是幂等的，`hubctl login`、凭证监视线程和启动比对都会做（顺序是先写 `account.json`、后改数据库，见 `hub-login`）。清理任务在句柄失效后把 `context_token` 置空；有效期的判断本身按时间现算，不依赖清理任务。
 
 ### 10. 项目密钥和认证
 
@@ -310,7 +315,7 @@ db:       { busy_timeout_ms: 5000 }
 log:      { level: INFO, max_mb: 5, keep: 5 }
 ```
 
-约束：`quota.window_limit` 至少比 `reply_reserve` 大 1；`server.lan` 与 `server.host` 的关系见 `hub-deploy`；登记、修改、启用项目时检查保底之和加回复保留不超过窗口总条数。配置里把 `window_limit` 改小，和库里已登记的保底冲突：启动**只警告**（事件、`status` 提示、`doctor` 错误），不拒绝启动，`decide` 里的 `max(pool, 0)` 保证这种状态下不会算出负的额度。
+约束：`quota.window_limit` 至少比 `reply_reserve` 大 1；`send.part_chars` 不小于 200；`server.shutdown_seconds` 小于 `send.timeout_seconds` 时只警告（关停时可能等不到最后一条发完）；`server.lan` 与 `server.host` 的关系见 `hub-deploy`；登记、修改、启用项目时检查保底之和加回复保留不超过窗口总条数。配置里把 `window_limit` 改小，和库里已登记的保底冲突：启动**只警告**（事件、`status` 提示、`doctor` 错误），不拒绝启动，`decide` 里的 `max(pool, 0)` 保证这种状态下不会算出负的额度。
 
 **固定常量**（不进配置，写在代码里并各有测试）：
 
@@ -326,7 +331,8 @@ log:      { level: INFO, max_mb: 5, keep: 5 }
 | `confirm_seconds` 上限 | 1800 秒 | 防护栏 |
 | 取话 `max` | 默认 10、上限 50；`ack` 一次最多 50 个 | 防护栏 |
 | 扫码 | 最多 5 张，每张最多等 180 秒，每秒查一次，查失败等 2 秒 | 与腾讯的二维码寿命配套 |
-| 凭证监视 | 每 5 秒；`login.pending` 20 分钟规则；凭证 60 秒内变过的 -14 不报警 | 实现细节 |
+| 凭证监视 | 每 5 秒；`login.pending` 20 分钟规则；`creds_changed_ms` 60 秒内的 -14 不报警；换上新凭证时唤醒收消息线程 | 实现细节 |
+| 发请求的预算保护 | 剩不到 1 秒，不再向腾讯发（含下一条的第一次尝试和重试） | 与 `upstream.request_timeout` 配套 |
 | 定时任务周期 | 30 秒（心跳同周期，`run.json` 超过 60 秒没更新就当服务没在运行） | 实现细节 |
 | 待取记录、收消息去重记录的保留 | 7 天 | 与句柄、保留期配套 |
 | 服务回复的内存队列 | 20 条 | 防护栏 |

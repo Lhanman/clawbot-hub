@@ -32,7 +32,7 @@
 | `ack(ids)` | `POST /v1/inbox/ack` | 确认了几条（`int`；一次最多 50 个，超过的客户端自动分批） |
 | `status()` | `GET /v1/status` | `dict`（原样的 JSON） |
 | `health()` | `GET /v1/health` | `dict` |
-| `run_inbox(handler, *, stop=lambda: False, wait=25, max=10, sleep=time.sleep)` | 反复调用取话和确认 | 见"至少送达一次的取话循环" |
+| `run_inbox(handler, *, stop=lambda: False, wait=25, max=10, sleep=time.sleep, heartbeat_seconds=None)` | 反复调用取话和确认 | 见"至少送达一次的取话循环" |
 
 读超时（socket 的等待时间）按调用不同：`inbox` 取 `max(timeout, wait + 10)`（等 55 秒的取话不会在 35 秒时读超时）；`send`、`reply` 取 `max(timeout, 服务的发送总时限 + 5)`，服务的发送总时限来自 `status()` 返回里的 `service.send_timeout_seconds`（客户端调过 `status()` 就记下，没调过按 30 秒）；其余用 `timeout`。
 
@@ -164,15 +164,15 @@
 
 ### Requirement: 至少送达一次的取话循环
 
-`HubClient.run_inbox(handler, *, stop=lambda: False, wait=25, max=10, sleep=time.sleep)` MUST 把"取话、处理、确认、连不上时退避"这个循环写对，项目不用自己再写一遍。每个项目同一时间只能有一个取话循环（服务只留一个正在等的取话请求，两个循环会互相顶掉）。
+`HubClient.run_inbox(handler, *, stop=lambda: False, wait=25, max=10, sleep=time.sleep, heartbeat_seconds=None)` MUST 把"取话、处理、确认、连不上时退避"这个循环写对，项目不用自己再写一遍。每个项目同一时间只能有一个取话循环（服务只留一个正在等的取话请求，两个循环会互相顶掉）。
 
 - 循环取话；对每一项调用 `handler(item)`，`handler` **正常返回**才把这一项的 `id` 加进确认列表，处理完这一批以后统一调 `ack`；`handler` 抛异常的那一项不确认（记日志，继续处理这一批里后面的），租期过后服务会再给一次；
-- **心跳**：`handler` 运行期间，客户端 MUST 每 `inbox_online_seconds / 3` 秒（`inbox_online_seconds` 来自 `status()` 的 `service.inbox_online_seconds`，开始循环时取一次，取不到按 90）调一次 `GET /v1/inbox?wait=0&max=0`，让服务知道项目还活着（处理一句慢指令超过 90 秒也不会被判成"没在线"）；心跳失败只记日志；
+- **心跳**：`handler` 运行期间，客户端 MUST 每 `heartbeat_seconds` 秒调一次 `GET /v1/inbox?wait=0&max=0`，让服务知道项目还活着（处理一句慢指令超过 90 秒也不会被判成"没在线"）。`heartbeat_seconds` 不传（`None`）时取 `inbox_online_seconds / 3`（`inbox_online_seconds` 来自 `status()` 的 `service.inbox_online_seconds`，开始循环时取一次，取不到按 90，所以默认是 30 秒）。`handler` 在调用方的线程里运行，心跳由客户端自己起的**后台线程**发：每个 `handler` 开始前启动、结束后（含抛异常）停止，线程用 `threading.Event.wait` 计时，不用 `sleep` 参数；`heartbeat_seconds` 是留给测试用的，传一个很小的数就能在几百毫秒里测完。心跳失败只记日志，不影响处理；
 - 连不上服务（`HubUnavailable`）时退避：5 秒起每次翻倍、最多 60 秒，恢复后重新计；
 - `ack` 失败（`HubUnavailable`）时不能丢掉这一批的待确认 `id`：用同样的退避只重试 `ack`，成功之后才继续取话（服务保证确认是幂等的）；
 - `HubAuthError` 时抛出（密钥不对或项目被停用，重试没有用）；`HubRequestError` 中 429 睡 `retry_after` 秒（没有就 60 秒）后继续，其余抛出；
 - `stop()` 为真时在两次取话之间退出（当前这一批处理完并确认）；
-- 一次返回快于 `wait / 2` 秒的空列表（`wait=0`、被同一项目的另一个取话请求顶掉、服务正在关闭）睡 1 秒再取，免得空转；服务已经等满的空列表不算错误，也不睡觉。
+- 一次耗时不到 `wait / 2` 秒的空列表（`wait=0` 时一律，被同一项目的另一个取话请求顶掉和服务正在关闭时也会很快返回）睡 1 秒再取，免得空转；服务已经等满的空列表（耗时不少于 `wait / 2`）不算错误，也不睡觉。
 
 #### Scenario: 处理失败的不确认
 
@@ -191,8 +191,18 @@
 
 #### Scenario: 处理慢指令时发心跳
 
-- **WHEN** `handler` 处理一句话用了 120 秒（假时钟），`inbox_online_seconds` 是 90
-- **THEN** 处理期间服务收到 `GET /v1/inbox?wait=0&max=0` 的心跳，约每 30 秒一次；项目一直是"在线"，期间使用者发的话不会得到"没在线"的提醒
+- **WHEN** 测试里把 `heartbeat_seconds` 设成 0.05，`handler` 处理一句话阻塞 0.3 秒
+- **THEN** 处理期间服务收到至少 3 次 `GET /v1/inbox?wait=0&max=0`；`handler` 一结束心跳就停（之后 0.3 秒内不再有心跳请求）；`handler` 抛异常时同样停
+
+#### Scenario: 心跳间隔的默认值
+
+- **WHEN** 不传 `heartbeat_seconds`，`status()` 返回的 `service.inbox_online_seconds` 是 90；另一次取不到 `status()`
+- **THEN** 前一次的心跳间隔是 30 秒，后一次按 90 秒算也是 30 秒（直接检查算出来的间隔，不用真等）
+
+#### Scenario: 慢指令期间保持在线
+
+- **WHEN** 项目的 `handler` 处理一句话用了比 `inbox.online_seconds` 还长的时间（测试里把 `inbox.online_seconds` 配成 1 秒、`heartbeat_seconds` 设成 0.2、`handler` 阻塞 3 秒），期间使用者又发了一句话
+- **THEN** 服务一直认为这个项目在线，第二句话正常入队，使用者没有收到"没在线"的提醒
 
 #### Scenario: 确认失败不丢
 
@@ -207,7 +217,7 @@
 #### Scenario: 空转保护
 
 - **WHEN** 取话立刻返回空列表（`wait=0`，或者被另一个取话请求顶掉）
-- **THEN** 两次取话之间至少睡 1 秒；服务等满 25 秒才返回的空列表，下一次取话前不睡
+- **THEN** 两次取话之间至少睡 1 秒（`wait=0` 时每次都睡）；服务等满 25 秒才返回的空列表，下一次取话前不睡
 
 #### Scenario: 请求停止
 

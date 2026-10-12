@@ -20,9 +20,10 @@
 
 ## A. 地基：纯函数、配置、数据库、腾讯接口、登录、项目、额度、最小命令行
 
-- [ ] A1 `textutil` `[云]`
+- [x] A1 `textutil` `[云]`
   - 先写测试：`tests/textutil/test_split.py`（把 ashare-quant 的 `split_message`、`headline` 的测试搬过来，行为逐条对上；`utf8_size` 不搬，hub 里没有按字节拆的地方；新增：标题最多 30 个字、超出加"…"，正文预算 `max(part_chars − len(开头), part_chars // 2)`；整条不超过 `part_chars` 就一条发完、不扣开头的位置（标题 10 字、全文 1990 字 → 一条且没有开头，2001 字 → 两条）；5000 字一行也满足"每条含开头不超过 `part_chars`、去掉开头后拼回等于原文"）、`test_match.py`（NFKC、大小写、全角空格、分隔符、连续多个分隔符、前缀后面直接连字不算、按位置从原文切、`hub.label` 作指令词）、`test_mask.py`（已知秘密和 `chub_…` 换成 `***`）
   - 再实现 `textutil.py`
+  - 实现说明：`headline`、`split_message` 照搬 ashare-quant 的算法，`split_message` 去掉了 `size` 参数，上限小于 1 抛 `ValueError`（免得死循环）。新增 `clip_title`、`part_head`、`add_label`、`body_budget`、`build_parts`：整条不超过 `part_chars` 就一条、没有开头；否则按 n = `window_limit` 估开头的字数，正文预算至少留一半。`strip_prefix` 找"原文里归一以后正好等于指令词的最短前缀"，所以归一会改变长度的写法（连字、带重音的合成字）也对得上，返回的文字按位置从原文切。`mask` 长的先换，再按 `chub_` 加 43 个字符的格式兜底。用故意改坏 25 处的办法确认测试会红：第一轮漏了 1 处（刚好等于上限而中间有换行），补了测试，全部抓到
 - [ ] A2 `config` `[云]`
   - 先写测试：`tests/config/test_config.py`——没有配置文件用全部默认值；错误一次列全（负数、端口越界、未知档位、`routing.confirm_words` 为空、未知时区）；`quota.reply_reserve ≥ window_limit` 拒绝；`send.part_chars` 小于 200 拒绝（200 通过）；`server.shutdown_seconds` 小于 `send.timeout_seconds` 只警告不拒绝；`server.lan` 与 `server.host` 的关系（`lan: false` 要回环地址，`lan: true` 要默认 host）；`routing.confirm_words` 默认只有对、是、确认
   - 再实现 `config.py`

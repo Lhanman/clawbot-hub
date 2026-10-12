@@ -1,0 +1,46 @@
+[project]
+name = "clawbot-hub"
+version = "0.1.0"
+description = "微信 ClawBot 共用服务：一个常驻程序独占登录，多个项目通过本机接口收发"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "pyyaml>=6.0",
+    "requests>=2.32",
+    "segno>=1.6",
+    "typer>=0.12",
+    "uvicorn>=0.30",
+]
+
+[project.scripts]
+hubctl = "clawbot_hub.cli:app"
+
+[build-system]
+requires = ["uv_build>=0.8.22,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.27",
+    "pytest>=8",
+    "ruff>=0.5",
+]
+
+[tool.ruff]
+line-length = 100
+# 文档里的代码块是手工排版的示意，不让 ruff 改
+extend-exclude = ["*.md"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# "." 让 `tests.support.fake_ilink` 能被导入；"client" 让单文件客户端能当模块导入
+pythonpath = [".", "client"]
+# `-p pytester`：有几条测试要在子进程里再跑一遍 pytest，验证守卫和 live 标记的行为
+addopts = ["-m", "not live", "--strict-markers", "-p", "pytester"]
+markers = [
+    "live: 访问真实的腾讯接口，默认不跑；要使用者在场授权后用 `uv run pytest -m live` 运行",
+]

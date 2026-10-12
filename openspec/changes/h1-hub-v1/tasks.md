@@ -6,12 +6,17 @@
 
 ## 0. 仓库骨架
 
-- [ ] 0.1 `[云]` `pyproject.toml`（Python ≥ 3.12，`uv`；依赖 fastapi、uvicorn、requests、typer、pyyaml、segno；开发 pytest、ruff、httpx）、ruff 配置、`pytest` 配置（`live` 标记默认跳过）、`uv.lock`
-- [ ] 0.2 `[云]` 先写测试：`tests/test_socket_guard.py`——连非回环地址抛"测试里不允许联网"，回环放行；再写 `tests/conftest.py` 里的守卫
-- [ ] 0.3 `[云]` 先写测试 `tests/test_clock.py`（`FakeClock` 的 `now_ms()`、`sleep()` 不真等、`advance()`；`wait(condition, timeout)`：假时钟 `advance()` 过了期限才返回（返回假），被 `notify` 提前叫醒返回真，都不真等；真时钟的接口形状一致），再写 `clock.py`
-- [ ] 0.4 `[云]` `tests/support/fake_ilink.py`：本机回环上的假腾讯服务（`getupdates` 长轮询、`sendmessage`、`get_bot_qrcode`（GET 和 POST）、`get_qrcode_status`、`notifystart`、`notifystop`；可编排：-14、5xx、429、读超时、连接被重置、空闲连接断开、无消息编号、延迟、扫码各状态；记录收到的每个请求的头和体）；**能独立运行**（`python -m tests.support.fake_ilink --port N`，给阶段 D 的演练和 E3 用；独立运行时同一个端口上另开 `/_fake/` 控制接口：`POST /_fake/inbox` 放一条使用者消息、`GET /_fake/sent` 看收到的 `sendmessage`、`POST /_fake/mode` 切成断开连接 / 回 -14 / 回 5xx / 恢复；扫码默认 `--confirm-after` 3 秒后自动变成已确认）；先写它自己的测试（`tests/support/test_fake_ilink.py`，含独立运行模式和 `/_fake/` 控制接口）
-- [ ] 0.5 `[云]` 假 Bark 服务（`tests/support/fake_bark.py`），先写测试（`test_fake_bark.py`：假件会按剧本给出每一种结果，免得假件写错而上层测试全绿）。进程内假上游（`fake_upstream.py`，要实现 `Upstream` 协议）等 A4 的 `upstream/base.py` 有了以后在 A4 里做
-- [ ] 0.6 `[云]` `tests/live/test_real_ilink.py`：真机验证清单里每一项的测试骨架（`live` 标记，默认跳过；骨架里只有步骤和断言占位，E4 在 Mac 上授权后才填实测值）；测试里有一条检查"默认运行时这些测试被跳过"
+- [x] 0.1 `[云]` `pyproject.toml`（Python ≥ 3.12，`uv`；依赖 fastapi、uvicorn、requests、typer、pyyaml、segno；开发 pytest、ruff、httpx）、ruff 配置、`pytest` 配置（`live` 标记默认跳过）、`uv.lock`
+- [x] 0.2 `[云]` 先写测试：`tests/test_socket_guard.py`——连非回环地址抛"测试里不允许联网"，回环放行；再写 `tests/conftest.py` 里的守卫
+  - 实现说明：守卫在 `tests/support/netguard.py`，抛的是 `NetworkBlocked`（继承 `RuntimeError`，不是 `OSError`，免得 requests 把误联网包成 `ConnectionError` 吞掉）；`tests/conftest.py` 的自动夹具还把 `HOME`、`CLAWBOT_HUB_HOME` 指到临时目录，清掉代理环境变量，并给每个测试装一个卡死看门狗（超过 `HUB_TEST_TIMEOUT` 秒，默认 120，打印所有线程的栈并退出）。`live` 标记的测试都不装
+- [x] 0.3 `[云]` 先写测试 `tests/test_clock.py`（`FakeClock` 的 `now_ms()`、`sleep()` 不真等、`advance()`；`wait(condition, timeout)`：假时钟 `advance()` 过了期限才返回（返回假），被 `notify` 提前叫醒返回真，都不真等；真时钟的接口形状一致），再写 `clock.py`
+  - 实现说明：`Clock` 接口和 `RealClock` 在 `src/clawbot_hub/clock.py`，`FakeClock` 在 `tests/support/fake_clock.py`（测试专用，不进发布的包）。`sleep()` 默认阻塞到 `advance()`，另有 `auto_sleep=True`（`sleep` 立刻返回并把假时间推进，给单线程跑到底的测试用）；`blocked_count` 和 `wait_until_blocked()` 让测试等线程睡下再推进时间
+- [x] 0.4 `[云]` `tests/support/fake_ilink.py`：本机回环上的假腾讯服务（`getupdates` 长轮询、`sendmessage`、`get_bot_qrcode`（GET 和 POST）、`get_qrcode_status`、`notifystart`、`notifystop`；可编排：-14、5xx、429、读超时、连接被重置、空闲连接断开、无消息编号、延迟、扫码各状态；记录收到的每个请求的头和体）；**能独立运行**（`python -m tests.support.fake_ilink --port N`，给阶段 D 的演练和 E3 用；独立运行时同一个端口上另开 `/_fake/` 控制接口：`POST /_fake/inbox` 放一条使用者消息、`GET /_fake/sent` 看收到的 `sendmessage`、`POST /_fake/mode` 切成断开连接 / 回 -14 / 回 5xx / 恢复；扫码默认 `--confirm-after` 3 秒后自动变成已确认）；先写它自己的测试（`tests/support/test_fake_ilink.py`，含独立运行模式和 `/_fake/` 控制接口）
+  - 实现说明：假腾讯和假 Bark 共用 `tests/support/fakehttp.py`（真 HTTP 服务、请求记录、回复编排：正常 JSON、任意状态码、网关页面、空响应体、挂住、RST、直接关、读到一半断开、延迟、回完话悄悄关连接）。`notifystart` / `notifystop` 的真实路径规格里没写明，假腾讯两种（带不带 `/msg`）都认，真机验证再定。0.4 的假件是先把实现写出来、再补的测试，补完用故意改坏 17 处的办法确认测试会红（全部抓到）
+- [x] 0.5 `[云]` 假 Bark 服务（`tests/support/fake_bark.py`），先写测试（`test_fake_bark.py`：假件会按剧本给出每一种结果，免得假件写错而上层测试全绿）。进程内假上游（`fake_upstream.py`，要实现 `Upstream` 协议）等 A4 的 `upstream/base.py` 有了以后在 A4 里做
+  - 实现说明：假 Bark 的 `valid_keys` 模拟“设备码填错”，错误信息里带着设备码（真的 Bark 就是这样），用来检验告警代码会不会把设备码写进事件和日志。同样用故意改坏 9 处的办法验过
+- [x] 0.6 `[云]` `tests/live/test_real_ilink.py`：真机验证清单里每一项的测试骨架（`live` 标记，默认跳过；骨架里只有步骤和断言占位，E4 在 Mac 上授权后才填实测值）；测试里有一条检查"默认运行时这些测试被跳过"
+  - 实现说明：清单条目在 `tests/live/checklist.py`（比 `hub-deploy` 点名的多两项：`notify_paths`、`qr_login_from_home_network`，D1 的文档要一并列上），`test_live_skeleton.py` 检查条目和骨架测试一一对应、默认运行时被跳过、`-m live` 时全部是跳过而不是失败
 
 ## A. 地基：纯函数、配置、数据库、腾讯接口、登录、项目、额度、最小命令行
 

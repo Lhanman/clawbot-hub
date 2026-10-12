@@ -139,6 +139,24 @@ def strip_prefix(text: str, word: str) -> str | None:
     return original[end:]
 
 
+# ---------------------------------------------------------------- 词的格式
+
+# 前缀、服务指令词、确认词最多这么多个字符（固定常量）
+WORD_MAX_CHARS = 8
+
+
+def is_word(text: str) -> bool:
+    """前缀、服务指令词（`hub.label`）、确认词的格式：1 到 8 个字符，只含字母、数字、汉字。
+
+    先做 NFKC 规范化再判断（全角和半角一样，字数也按规范化以后的数）。字母包括各国文字的
+    字母（汉字、假名都算），数字指十进制数字；空白、标点、符号一概不行。
+    """
+    folded = unicodedata.normalize("NFKC", text)
+    if not 1 <= len(folded) <= WORD_MAX_CHARS:
+        return False
+    return all(char.isalpha() or char.isdecimal() for char in folded)
+
+
 # ---------------------------------------------------------------- 脱敏
 
 MASK = "***"

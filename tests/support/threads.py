@@ -37,6 +37,12 @@ class Worker:
         """给它一小段真实时间，看它是不是仍然没返回（用来断言"还没醒"）。"""
         return not self._done.wait(real_seconds)
 
+    def join(self, timeout: float = REAL_TIMEOUT) -> None:
+        """等线程真的结束（`result()` 返回时函数已经跑完，但线程本身可能还没退出）。"""
+        self._thread.join(timeout)
+        if self._thread.is_alive():
+            raise AssertionError(f"线程在 {timeout} 秒（真实时间）内没有退出")
+
     def result(self, timeout: float = REAL_TIMEOUT) -> Any:
         """等线程结束并返回它的值；线程里抛了异常就在这里重新抛出。"""
         if not self._done.wait(timeout):

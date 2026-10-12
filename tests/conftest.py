@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import faulthandler
 import os
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -65,6 +66,33 @@ def _hang_watchdog():
 def clock() -> FakeClock:
     """每个测试一个新的假时钟（sleep 阻塞到 advance；单线程跑到底的测试自己建 auto_sleep 的）。"""
     return FakeClock()
+
+
+@pytest.fixture
+def display_tz() -> ZoneInfo:
+    """显示时区（备份目录名里的时间、每天几点备份都按它）。"""
+    return ZoneInfo("Asia/Shanghai")
+
+
+@pytest.fixture
+def paths():
+    """每个测试一个空的数据目录（临时目录里，0700），还没有 hub.db。"""
+    from clawbot_hub.paths import HubPaths, ensure_home, resolve_home
+
+    hub_paths = HubPaths(resolve_home())
+    ensure_home(hub_paths)
+    return hub_paths
+
+
+@pytest.fixture
+def database(paths, clock: FakeClock, display_tz: ZoneInfo):
+    """跑完全部迁移的数据库（`Database`，每个线程各用各的连接）。"""
+    from clawbot_hub.db import Database, migrate
+
+    migrate(paths, clock=clock, tz=display_tz)
+    db = Database(paths.db)
+    yield db
+    db.close()
 
 
 @pytest.fixture

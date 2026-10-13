@@ -42,6 +42,7 @@ class FakeClock:
         # `_tick` 同时是：假时钟自己的锁、睡着的线程等待的条件、"有线程睡下了"的通知
         self._tick = threading.Condition()
         self._waiters: list[_Waiter] = []
+        self._sleeping: list[int] = []  # 睡在 sleep 里的线程各自的期限
         self._blocked = 0
 
     # ---------- Clock 接口 ----------
@@ -62,11 +63,13 @@ class FakeClock:
         with self._tick:
             deadline = self._now_ms + ms
             self._blocked += 1
+            self._sleeping.append(deadline)
             self._tick.notify_all()  # 让 wait_until_blocked 知道又多了一个
             try:
                 while self._now_ms < deadline:
                     self._tick.wait()
             finally:
+                self._sleeping.remove(deadline)
                 self._blocked -= 1
 
     def wait(self, condition: threading.Condition, timeout: float | None = None) -> bool:
@@ -100,6 +103,20 @@ class FakeClock:
         """现在有多少个线程睡在 `sleep` / `wait` 里。"""
         with self._tick:
             return self._blocked
+
+    def pending_deadlines(self) -> list[int]:
+        """现在睡着的线程各自在等哪一刻（假时间的毫秒），从早到晚；不限时的、已经到期正要醒的不算。
+
+        用来确定地检查"这个线程下一次会在 5 秒后醒"：比 `advance()` 之后看它醒没醒可靠，
+        后者要等线程真的跑起来，"还没醒"的断言在线程慢的时候会白白通过。"""
+        with self._tick:
+            waiting = [
+                w.deadline_ms
+                for w in self._waiters
+                if not w.expired and w.deadline_ms is not None and w.deadline_ms > self._now_ms
+            ]
+            sleeping = [d for d in self._sleeping if d > self._now_ms]
+            return sorted(waiting + sleeping)
 
     def wait_until_blocked(self, count: int = 1, timeout: float = 5.0) -> None:
         """等到至少有 `count` 个线程睡在 `sleep` / `wait` 里（`timeout` 是真实秒数）。

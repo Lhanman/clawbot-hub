@@ -247,6 +247,40 @@ def test_blocked_count_counts_sleepers_and_waiters_and_drops_when_they_return():
     assert clock.blocked_count == 0
 
 
+def test_pending_deadlines_lists_what_each_sleeper_and_waiter_is_waiting_for():
+    clock = FakeClock(start_ms=1_000)
+    cond_a, cond_b = threading.Condition(), threading.Condition()
+    sleeper = run_in_thread(clock.sleep, 3)  # 4_000
+    timed = run_in_thread(_wait_call, clock, cond_a, 2)  # 3_000
+    endless = run_in_thread(_wait_call, clock, cond_b, None)  # 不限时的不列
+    clock.wait_until_blocked(3)
+
+    assert clock.pending_deadlines() == [3_000, 4_000]
+
+    clock.advance(2)
+    timed.result()
+    assert clock.pending_deadlines() == [4_000]
+
+    clock.advance(1)
+    sleeper.result()
+    assert clock.pending_deadlines() == []
+    with cond_b:
+        cond_b.notify_all()
+    assert endless.result() is True
+
+
+def test_a_deadline_that_has_just_passed_is_no_longer_pending():
+    clock = FakeClock(start_ms=0)
+    worker = run_in_thread(clock.sleep, 5)
+    clock.wait_until_blocked()
+    assert clock.pending_deadlines() == [5_000]
+
+    clock.advance(5)
+
+    assert clock.pending_deadlines() == []  # 线程可能还没跑起来，期限已经算过了
+    worker.result()
+
+
 def test_wait_until_blocked_gives_up_in_real_time_instead_of_hanging():
     clock = FakeClock(start_ms=0)
     started = time.monotonic()

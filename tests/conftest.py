@@ -19,6 +19,7 @@ from tests.support import netguard
 from tests.support.fake_bark import FakeBark
 from tests.support.fake_clock import FakeClock
 from tests.support.fake_ilink import FakeIlink
+from tests.support.fake_upstream import FakeUpstream
 
 PROXY_VARS = (
     "HTTP_PROXY",
@@ -27,6 +28,8 @@ PROXY_VARS = (
     "http_proxy",
     "https_proxy",
     "all_proxy",
+    "NO_PROXY",
+    "no_proxy",
 )
 
 
@@ -107,3 +110,9 @@ def fake_bark(clock: FakeClock):
     """本机回环上的假 Bark 服务。"""
     with FakeBark(now_ms=clock.now_ms) as server:
         yield server
+
+
+@pytest.fixture
+def fake_upstream(clock: FakeClock) -> FakeUpstream:
+    """进程内的假上游（不走网络，按剧本给出每一种结果），组件测试用它代替 `HttpUpstream`。"""
+    return FakeUpstream(clock=clock)

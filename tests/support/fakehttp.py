@@ -20,7 +20,9 @@ import dataclasses
 import json
 import socket
 import socketserver
+import ssl
 import struct
+import sys
 import threading
 import time
 from collections import deque
@@ -122,6 +124,9 @@ class RecordedRequest:
     connection_id: int  # 同一条 TCP 连接上的请求编号相同
     at: float  # time.monotonic()
     json: Any = None  # 请求体是合法 JSON 时解析出来
+    # 请求行里原样的"请求目标"（带查询串）。标准库会把开头的 `//` 悄悄改成 `/`，
+    # `path` 因此看不出多出来的斜杠，要查地址拼得对不对得看这个
+    target: str = ""
 
     def header(self, name: str) -> str | None:
         for key, value in self.headers:
@@ -146,6 +151,13 @@ class _Server(ThreadingHTTPServer):
     def __init__(self, address: tuple[str, int], fake: FakeHttp) -> None:
         self.fake = fake
         super().__init__(address, _Handler)
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        # 客户端自己断开（超时、证书握手失败、被测代码主动关）时，处理线程写回应会碰上
+        # BrokenPipe / ConnectionReset，这是测试里的家常便饭，不打印
+        if isinstance(sys.exc_info()[1], (ConnectionError, TimeoutError)):
+            return
+        super().handle_error(request, client_address)
 
     def server_bind(self) -> None:
         # 跳过 getfqdn：有的机器上反查本机名要好几秒
@@ -190,6 +202,7 @@ class _Handler(BaseHTTPRequestHandler):
             endpoint="",
             method=self.command,
             path=parts.path,
+            target=self.raw_requestline.decode("latin-1").split(" ")[1],
             query=dict(reversed(parse_qsl(parts.query, keep_blank_values=True))),
             headers=list(self.headers.items()),
             body=body,
@@ -261,10 +274,16 @@ class FakeHttp:
     endpoints: tuple[str, ...] = ()
 
     def __init__(
-        self, *, host: str = "127.0.0.1", port: int = 0, close_after_response: bool = False
+        self,
+        *,
+        host: str = "127.0.0.1",
+        port: int = 0,
+        close_after_response: bool = False,
+        ssl_context: ssl.SSLContext | None = None,
     ) -> None:
         self.host = host
         self.close_after_response = close_after_response
+        self._ssl_context = ssl_context  # 给了就是 https：监听的套接字上套一层 TLS
         self._requested_port = port
         self._server: _Server | None = None
         self._thread: threading.Thread | None = None
@@ -293,7 +312,9 @@ class FakeHttp:
         if self._server is not None:
             return self
         self._stopping.clear()
-        self._server = _Server((self.host, self._requested_port), self)
+        server = self._server = _Server((self.host, self._requested_port), self)
+        if self._ssl_context is not None:
+            server.socket = self._ssl_context.wrap_socket(server.socket, server_side=True)
         self._thread = threading.Thread(
             target=self._server.serve_forever,
             kwargs={"poll_interval": 0.05},
@@ -329,7 +350,8 @@ class FakeHttp:
 
     @property
     def base_url(self) -> str:
-        return f"http://{self.host}:{self.port}"
+        scheme = "http" if self._ssl_context is None else "https"
+        return f"{scheme}://{self.host}:{self.port}"
 
     # ---- 记录 ----
 

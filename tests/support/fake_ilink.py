@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import signal
+import ssl
 import sys
 import threading
 import time
@@ -146,8 +147,14 @@ class FakeIlink(FakeHttp):
         close_after_response: bool = False,
         redeliver: bool = True,
         confirm_after: float = 0.0,
+        ssl_context: ssl.SSLContext | None = None,
     ) -> None:
-        super().__init__(host=host, port=port, close_after_response=close_after_response)
+        super().__init__(
+            host=host,
+            port=port,
+            close_after_response=close_after_response,
+            ssl_context=ssl_context,
+        )
         self.user_id = user_id
         self.bot_id = bot_id
         self.longpoll_seconds = longpoll_seconds

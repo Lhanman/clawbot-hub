@@ -139,6 +139,19 @@ def strip_prefix(text: str, word: str) -> str | None:
     return original[end:]
 
 
+# ---------------------------------------------------------------- 能不能编码
+
+
+def is_encodable(value: str) -> bool:
+    """能编码成 UTF-8（JSON 里 `"\\ud800"` 这样单独的代理字符合法，却没法发出去、没法存进数据库、
+    也没法算摘要）。接口收到的字符串要先过这一关，免得到了深处才抛编码错误。"""
+    try:
+        value.encode()
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 # ---------------------------------------------------------------- 词的格式
 
 # 前缀、服务指令词、确认词最多这么多个字符（固定常量）

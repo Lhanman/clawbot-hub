@@ -49,6 +49,16 @@ def test_limit_changes_how_many(database, run, clock):
     assert [d for d in details(result) if d.startswith("第 ")] == ["第 8 条", "第 9 条", "第 10 条"]
 
 
+def test_limit_one_shows_exactly_the_newest_event(database, run, clock):
+    put(database, clock, "lifecycle", "旧的", ago=-1)
+    put(database, clock, "lifecycle", "新的", ago=-2)
+
+    result = run("events", "--limit", "1")
+
+    assert result.exit_code == 0, result.output
+    assert details(result) == ["新的"]
+
+
 @pytest.mark.parametrize("limit", ["0", "-1", "x"])
 def test_a_limit_that_makes_no_sense_is_a_usage_error(database, run, limit):
     assert run("events", "--limit", limit).exit_code == 2
@@ -99,6 +109,7 @@ def test_an_unknown_kind_is_a_usage_error_that_lists_the_known_ones(database, ru
     result = run("events", "--kind", kind)
 
     assert result.exit_code == 2
+    assert f"不认识的事件种类：{kind or '（空）'}。" in result.output
     for known in KINDS:
         assert known in result.output
 
@@ -126,6 +137,15 @@ def test_json_is_a_list_of_objects_with_the_same_order(database, run, clock):
     assert (first["level"], first["kind"], first["project"]) == ("WARNING", "send", "alpha")
     assert first["time"] == "2026-10-12T10:00:05+08:00"
     assert listed[-1]["project"] is None
+
+
+def test_json_is_indented_by_two_spaces_and_keeps_chinese_readable(database, run, clock):
+    put(database, clock, "alert", "告警放弃：登录失效", ago=-5)
+
+    text = run("events", "--json", "--kind", "alert").stdout
+
+    assert text.startswith('[\n  {\n    "id": ')
+    assert "告警放弃：登录失效" in text and "\\u" not in text
 
 
 def test_json_respects_limit_and_kind(database, run, clock):

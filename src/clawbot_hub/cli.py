@@ -757,9 +757,7 @@ def version(ctx: typer.Context, home: HomeOption = None, config: ConfigOption = 
     except DatabaseProblem:
         found = "库文件读不懂"
     except sqlite3.OperationalError as exc:
-        if not is_busy(exc):
-            raise
-        found = "库文件正忙，读不到"
+        found = "库文件正忙，读不到" if is_busy(exc) else f"库文件打不开（{exc}）"
     else:
         if stored is None:
             found = "还没有库文件"
@@ -813,19 +811,17 @@ def backup(
             )
         except BackupError as exc:
             _fail(str(exc))
+        note = None
         try:
             with db.txn() as conn:
                 add_event(conn, clock.now_ms(), "backup", f"手动备份完成：{name}")
-            recorded = True
-        except sqlite3.OperationalError as exc:  # 备份已经做成了，别因为记不上事件就说它失败
-            if not is_busy(exc):
-                raise
-            recorded = False
+        except sqlite3.Error as exc:  # 备份已经做成了，别因为记不上事件就说它失败
+            note = f"（{'数据库正忙，' if is_busy(exc) else ''}这次备份没能写进事件记录）"
     _say(f"备份完成：{made.directory}")
     for filename, size in made.files.items():
         _say(f"  {filename}：{size} 字节")
-    if not recorded:
-        _say("（数据库正忙，这次备份没能写进事件记录）")
+    if note:
+        _say(note)
     _say(CREDENTIALS_WARNING)
 
 

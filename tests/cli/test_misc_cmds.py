@@ -7,7 +7,9 @@
 
 from __future__ import annotations
 
+import errno
 import json
+import sqlite3
 
 import pytest
 
@@ -58,6 +60,8 @@ def test_set_key_reads_the_key_from_standard_input_and_keeps_it_private(run, hub
     assert mode_of(hub_paths.bark) == 0o600
     assert DEVICE not in result.output
     assert "hubctl alerts test" in result.stdout  # 下一步做什么
+    assert ENV_KEY not in result.stdout  # 环境变量里没有设备码，就不提它
+    assert "输入时不显示" not in result.output  # 从管道读的，不问
     assert not hub_paths.db.exists()  # 只是存个文件，不建库
 
 
@@ -123,6 +127,22 @@ def test_in_a_terminal_the_key_is_asked_for_without_echo(run, hub_paths, no_env_
     assert result.exit_code == 0, result.output
     assert json.loads(hub_paths.bark.read_text(encoding="utf-8")) == {"key": DEVICE}
     assert DEVICE not in result.output  # 提示语之后输入的字不回显
+    assert result.stdout.startswith("Bark 设备码或推送地址（输入时不显示）: ")  # 没有 [默认值]
+
+
+def test_a_key_file_that_cannot_be_written_is_a_failure_with_the_reason(
+    run, hub_paths, no_env_key, monkeypatch
+):
+    def refuse(*_args, **_kwargs):
+        raise PermissionError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr("clawbot_hub.cli.write_bark_key", refuse)
+
+    result = set_key(run, DEVICE)
+
+    assert result.exit_code == 1
+    assert "设备码存不进 bark.json（Permission denied）" in result.output
+    assert "已保存" not in result.output and DEVICE not in result.output
 
 
 def test_an_environment_key_that_wins_over_the_file_is_pointed_out(run, hub_paths, monkeypatch):
@@ -262,11 +282,22 @@ def test_every_setting_is_shown_with_its_default(run, no_env_key):
     lines = shown(result)
     assert set(lines) == set(Config().flat())
     assert lines["server.port"] == "8790" and lines["server.lan"] == "false"
+    assert lines["alerts.window_warn.enabled"] == "true"  # 默认是真的也写 true
     assert lines["upstream.base_url"] == "https://ilinkai.weixin.qq.com"
     assert lines["routing.confirm_words"] == "[对, 是, 确认]"
     assert lines["alerts.window_warn.weekdays"] == "[1, 2, 3, 4, 5]"
     assert lines["alerts.window_warn.between"] == "07:00-22:30"
     assert lines["send.message_id_keys"] == "[message_id, msg_id]"
+
+
+def test_the_key_line_comes_once_right_after_the_last_alerts_setting(run, no_env_key):
+    lines = run("config", "show").stdout.splitlines()
+    alert_settings = [i for i, line in enumerate(lines) if line.startswith("alerts.")]
+    key_lines = [i for i, line in enumerate(lines) if line.startswith("设备码：")]
+
+    assert len(key_lines) == 1
+    assert key_lines[0] == alert_settings[-1] + 1
+    assert alert_settings == list(range(alert_settings[0], alert_settings[-1] + 1))  # 连在一起
 
 
 def test_values_from_the_file_replace_the_defaults(run, home):
@@ -411,6 +442,37 @@ def test_version_reports_a_database_that_is_newer_than_the_program(run, database
 
     assert result.exit_code == 0, result.output
     assert "库文件里是 9（比程序新，程序不会动它）" in result.stdout
+
+
+def test_version_says_when_the_database_is_busy_instead_of_failing(run, database, monkeypatch):
+    error = sqlite3.OperationalError("database is locked")
+    error.sqlite_errorcode = sqlite3.SQLITE_BUSY
+    monkeypatch.setattr("clawbot_hub.cli.stored_version", failing(error))
+
+    result = run("version")
+
+    assert result.exit_code == 0, result.output
+    assert "库文件正忙，读不到" in result.stdout
+
+
+def test_version_says_when_the_database_cannot_be_opened_instead_of_failing(
+    run, database, monkeypatch
+):
+    error = sqlite3.OperationalError("unable to open database file")
+    monkeypatch.setattr("clawbot_hub.cli.stored_version", failing(error))
+
+    result = run("version")
+
+    assert result.exit_code == 0, result.output
+    assert "库文件打不开（unable to open database file）" in result.stdout
+    assert "正忙" not in result.stdout and "Traceback" not in result.output
+
+
+def failing(error: Exception):
+    def read(*_args, **_kwargs):
+        raise error
+
+    return read
 
 
 def test_version_reports_a_file_that_is_not_the_hub_database(run, hub_paths):

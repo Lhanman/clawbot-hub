@@ -18,7 +18,7 @@ import pytest
 import requests
 from urllib3.exceptions import MaxRetryError, NewConnectionError
 
-from clawbot_hub.sendcmd import never_sent
+from clawbot_hub.sendcmd import never_sent, shown_address
 from tests.cli.conftest import mode_of
 from tests.support.fakehttp import (
     FakeHttp,
@@ -104,7 +104,7 @@ def test_one_post_with_the_key_and_just_the_text(run, server):
     result = send(run, server, "盘点完成")
 
     assert result.exit_code == 0, result.output
-    assert result.stdout.strip() == "sent"
+    assert result.stdout == "sent\n" and result.stderr == ""  # 成功时没有多余的空行
     [request] = server.requests_to("messages")
     assert (request.method, request.path) == ("POST", "/v1/messages")
     assert request.header("Authorization") == f"Bearer {KEY}"
@@ -166,12 +166,14 @@ def test_the_default_timeout_is_35_seconds_and_connecting_has_its_own_limit(
     assert seen["timeout"][1] == 7.5 and seen["timeout"][0] <= 7.5
 
 
-def test_redirects_are_not_followed_so_the_key_never_travels_further(run, server):
-    server.reply_with(Reply(status=307, headers={"Location": f"{server.base_url}/elsewhere"}))
+@pytest.mark.parametrize("status", [300, 301, 302, 307, 308])
+def test_redirects_are_not_followed_so_the_key_never_travels_further(run, server, status):
+    server.reply_with(Reply(status=status, headers={"Location": f"{server.base_url}/elsewhere"}))
 
     result = send(run, server, "x")
 
     assert result.exit_code == 12
+    assert f"服务回了重定向（HTTP {status}）" in result.stderr
     assert len(server.requests) == 1
 
 
@@ -320,6 +322,17 @@ def test_a_key_file_that_is_missing_or_empty_is_a_usage_error(run, server, tmp_p
     assert server.requests == []
 
 
+def test_a_key_file_that_is_a_folder_is_refused_for_that_reason(run, server, tmp_path):
+    folder = tmp_path / "project.key"
+    folder.mkdir(mode=0o700)
+
+    result = send(run, server, "--key-file", str(folder), "x")
+
+    assert result.exit_code == 2
+    assert "不是普通文件" in result.output
+    assert server.requests == []
+
+
 def test_a_key_file_and_a_key_variable_together_are_a_usage_error(run, server, tmp_path):
     key_file = tmp_path / "project.key"
     key_file.write_text(KEY, encoding="utf-8")
@@ -448,6 +461,33 @@ def test_json_prints_what_the_service_returned_unchanged(run, server):
     assert json.loads(result.stdout) == body
 
 
+@pytest.mark.parametrize(
+    "reply",
+    [
+        Reply(status=401, body=error_body("unauthorized", "密钥不对")),
+        Reply(status=400, body=error_body("text_too_long", "文字太长")),
+        Reply(status=500, body=error_body("internal", "出错了")),
+        Reply(status=307, body="跳转页"),
+        Reply(body=result_body("rejected", code="window_closed", reason=WINDOW_CLOSED)),
+    ],
+    ids=["401", "400", "500", "307", "rejected"],
+)
+def test_without_json_standard_output_never_carries_the_raw_answer(run, server, reply):
+    server.reply_with(reply)
+
+    result = send(run, server, "x")
+
+    assert "{" not in result.stdout and "跳转页" not in result.stdout
+
+
+def test_json_prints_the_answer_raw_even_for_a_redirect_page(run, server):
+    server.reply_with(Reply(status=307, body="跳转页\n"))
+
+    result = send(run, server, "--json", "x")
+
+    assert result.exit_code == 12 and result.stdout == "跳转页\n"  # 末尾的换行由 _say 补回
+
+
 def test_an_error_body_is_printed_unchanged_with_json_too(run, server):
     body = error_body("unauthorized", "密钥不对")
     server.reply_with(Reply(status=401, body=body))
@@ -484,6 +524,56 @@ def test_a_script_can_use_or_to_fall_back_only_when_it_matters(run, server):
 
 
 # ---------------------------------------------------------------- 接口错误：没发成，知道没发成
+
+
+KEY_HINT = "：密钥不对，或者这个项目已经停用"
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "expected"),
+    [
+        (
+            403,
+            error_body("key_rejected", "项目已停用"),
+            "服务不认这把密钥（HTTP 403 key_rejected）：项目已停用",
+        ),
+        (
+            401,
+            {"error": {"code": "key_rejected"}},
+            "服务不认这把密钥（HTTP 401 key_rejected）" + KEY_HINT,
+        ),
+        (403, {"error": {"message": "项目已停用"}}, "服务不认这把密钥（HTTP 403）：项目已停用"),
+        (401, {}, "服务不认这把密钥（HTTP 401）" + KEY_HINT),
+        (
+            403,
+            {"error": {"code": 5, "message": ["不是字符串"]}},
+            "服务不认这把密钥（HTTP 403）" + KEY_HINT,
+        ),
+        (403, "<html>不是 JSON</html>", "服务不认这把密钥（HTTP 403）" + KEY_HINT),
+        (400, {"error": {"code": "x"}}, "服务拒绝了请求（HTTP 400 x）"),
+        (400, {"error": {"message": "文字太长"}}, "服务拒绝了请求（HTTP 400）：文字太长"),
+        (400, {"error": {"code": "", "message": ""}}, "服务拒绝了请求（HTTP 400）"),
+    ],
+    ids=[
+        "both",
+        "code-only",
+        "message-only",
+        "empty",
+        "not-strings",
+        "html",
+        "400-code-only",
+        "400-message-only",
+        "400-empty-strings",
+    ],
+)
+def test_the_error_line_has_exactly_the_parts_the_service_gave(run, server, status, body, expected):
+    server.reply_with(Reply(status=status, body=body))
+
+    result = send(run, server, "x")
+
+    assert result.stderr.strip() == expected
+    assert result.stdout == ""  # 没发出去的时候标准输出是空的，脚本不会误以为拿到了结果
+    assert "None" not in result.output
 
 
 @pytest.mark.parametrize("status", [401, 403])
@@ -527,6 +617,44 @@ def test_a_rate_limit_says_how_long_to_wait(run, server):
     result = send(run, server, "x")
 
     assert result.exit_code == 12 and "12 秒" in result.output
+
+
+@pytest.mark.parametrize(
+    ("headers", "tail"),
+    [
+        ({"Retry-After": "12"}, "；12 秒后再试"),
+        ({"Retry-After": " 3 "}, "；3 秒后再试"),
+        ({}, "；稍后再试"),
+        ({"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"}, "；稍后再试"),  # 写成日期的不读
+        ({"Retry-After": "-5"}, "；稍后再试"),
+        ({"Retry-After": ""}, "；稍后再试"),
+    ],
+)
+def test_a_rate_limit_waits_as_long_as_the_service_says_and_only_if_it_says_it_in_seconds(
+    run, server, headers, tail
+):
+    server.reply_with(Reply(status=429, headers=headers, body=error_body("rate_limited", "太快了")))
+
+    result = send(run, server, "x")
+
+    assert result.stderr.strip() == "服务拒绝了请求（HTTP 429 rate_limited）：太快了" + tail
+
+
+def test_other_errors_never_tell_you_to_try_again_later(run, server):
+    server.reply_with(Reply(status=400, headers={"Retry-After": "9"}, body=error_body("x", "y")))
+
+    assert "再试" not in send(run, server, "x").stderr
+
+
+@pytest.mark.parametrize("reason", [None, "", 5, ["列表"]])
+def test_a_reason_that_is_not_a_sentence_is_left_out_of_the_one_line_summary(run, server, reason):
+    body = result_body("skipped", code="window_closed")
+    body["reason"] = reason
+    server.reply_with(Reply(body=body))
+
+    result = send(run, server, "x")
+
+    assert result.exit_code == 0 and result.stdout.strip() == "skipped"
 
 
 def test_the_message_of_an_error_comes_from_the_service(run, server):
@@ -576,6 +704,7 @@ def test_a_connection_that_breaks_after_the_request_went_out_may_have_gone_out(r
 
     assert result.exit_code == 13, result.output
     assert "可能已经发出，请不要重发" in result.output
+    assert "请求发出以后连接出了问题" in result.output and "等了" not in result.output
     assert len(server.requests_to("messages")) == 1  # 命令自己绝不重发
 
 
@@ -680,3 +809,36 @@ def refused() -> BaseException:
 )
 def test_only_a_failure_to_connect_counts_as_certainly_not_sent(error, never_went_out):
     assert never_sent(error) is never_went_out
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("http://127.0.0.1:8790", "http://127.0.0.1:8790"),
+        ("https://example.com/some/path", "https://example.com"),  # 没写端口不带 :None
+        ("http://user:pw@example.com:81/x", "http://example.com:81"),  # 口令和路径不写
+        ("http://[::1]:9", "http://[::1]:9"),
+        ("http://[::1]", "http://[::1]"),
+        ("http://example.com:99999", "http://example.com"),  # 端口写坏了就不写
+    ],
+)
+def test_the_address_shown_to_people_is_scheme_host_and_port_only(url, expected):
+    assert shown_address(url) == expected
+
+
+def test_a_cycle_in_the_chain_of_causes_does_not_hang():
+    first, second = RuntimeError("a"), RuntimeError("b")
+    first.__cause__, second.__cause__ = second, first
+
+    assert never_sent(first) is False
+
+
+def test_an_error_hidden_deep_in_the_chain_of_causes_is_still_found():
+    inner = NewConnectionError(None, "Failed to establish a new connection")
+    outer = RuntimeError("外面套了一层")
+    outer.__cause__ = RuntimeError("又一层")
+    outer.__cause__.__context__ = requests.exceptions.ConnectionError(
+        MaxRetryError(None, "http://x/", reason=inner)
+    )
+
+    assert never_sent(outer) is True

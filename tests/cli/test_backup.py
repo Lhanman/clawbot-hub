@@ -103,6 +103,13 @@ def test_backups_are_private_by_default(run, full_home):
         assert mode_of(entry) == 0o600, entry.name
 
 
+def test_a_backup_whose_event_was_written_says_nothing_about_events(run, full_home):
+    result = run("backup")
+
+    assert result.exit_code == 0, result.output
+    assert "事件记录" not in result.output
+
+
 def test_a_manual_backup_leaves_an_event_with_the_name_only(run, full_home):
     run("backup")
 
@@ -138,7 +145,7 @@ def test_without_a_database_there_is_nothing_to_back_up(run, hub_paths):
     result = run("backup")
 
     assert result.exit_code == 1
-    assert "没有数据库可备份" in result.output
+    assert "没有数据库可备份：还没有登记过项目，也没有绑定过账号" in result.output
     assert not hub_paths.backups.exists()
 
 
@@ -193,6 +200,23 @@ def test_a_backup_that_was_made_is_not_called_failed_just_because_the_event_coul
     assert (full_home.backups / STAMP / "hub.db").is_file()
     assert "没能写进事件记录" in result.output and WARNING in result.output
     assert "手动备份完成" not in run("events", "--kind", "backup").stdout
+
+
+def test_an_event_that_cannot_be_written_for_another_reason_is_also_only_mentioned(
+    run, full_home, monkeypatch
+):
+    """磁盘满、库只读之类：备份已经做成了，照样退出 0，只是不说"正忙"。"""
+
+    def refuse(*_args, **_kwargs):
+        raise sqlite3.OperationalError("database or disk is full")
+
+    monkeypatch.setattr("clawbot_hub.cli.add_event", refuse)
+
+    result = run("backup")
+
+    assert result.exit_code == 0, result.output
+    assert (full_home.backups / STAMP / "hub.db").is_file()
+    assert "这次备份没能写进事件记录" in result.output and "正忙" not in result.output
 
 
 # ---------------------------------------------------------------- --to
@@ -258,6 +282,7 @@ def test_a_cloud_folder_gets_a_loud_warning_but_the_backup_is_still_made(
     assert (parent / STAMP / "hub.db").is_file()
     assert "警告" in result.output and "云盘" in result.output and "同步" in result.output
     assert WARNING in result.output
+    assert "云盘" in result.stderr and "云盘会" not in result.stdout  # 警告走标准错误
 
 
 def test_a_cloud_folder_is_recognised_through_a_symlink_too(run, full_home, tmp_path):

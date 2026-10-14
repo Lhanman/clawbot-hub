@@ -220,36 +220,34 @@ def send_message(
     address: str, key: str, payload: Mapping[str, Any], *, timeout: float, as_json: bool
 ) -> SendOutcome:
     """`POST <address>/v1/messages`。`address` 已经过 `check_address`。"""
-    session = requests.Session()
-    session.trust_env = False  # 不读代理环境变量，也不读 ~/.netrc
-    try:
-        response = session.post(
-            f"{address}/v1/messages",
-            json=dict(payload),
-            headers={"Authorization": f"Bearer {key}"},
-            timeout=(min(timeout, CONNECT_TIMEOUT_SECONDS), timeout),
-            allow_redirects=False,
-        )
-    except Exception as exc:  # noqa: BLE001 - 不管是什么故障，都要变成一个确定的退出码
-        if never_sent(exc):
-            return SendOutcome(
-                EXIT_NOT_SENT,
-                err=f"连不上共用服务（{shown_address(address)}）：没有发出任何东西。服务是不是没开？",
+    with requests.Session() as session:
+        session.trust_env = False  # 不读代理环境变量，也不读 ~/.netrc
+        try:
+            response = session.post(
+                f"{address}/v1/messages",
+                json=dict(payload),
+                headers={"Authorization": f"Bearer {key}"},
+                timeout=(min(timeout, CONNECT_TIMEOUT_SECONDS), timeout),
+                allow_redirects=False,
             )
-        if isinstance(exc, requests.exceptions.ReadTimeout):
-            cause = f"等了 {_seconds(timeout)} 秒，服务还没有回话"
-        else:
-            cause = f"请求发出以后连接出了问题（{type(exc).__name__}）"
-        return SendOutcome(EXIT_NO_RESULT, err=f"{cause}。{MAY_HAVE_GONE_OUT}")
-    finally:
-        session.close()
+        except Exception as exc:  # noqa: BLE001 - 不管是什么故障，都要变成一个确定的退出码
+            if never_sent(exc):
+                return SendOutcome(
+                    EXIT_NOT_SENT,
+                    err=f"连不上共用服务（{shown_address(address)}）：没有发出任何东西。"
+                    "服务是不是没开？",
+                )
+            if isinstance(exc, requests.exceptions.ReadTimeout):
+                cause = f"等了 {_seconds(timeout)} 秒，服务还没有回话"
+            else:
+                cause = f"请求发出以后连接出了问题（{type(exc).__name__}）"
+            return SendOutcome(EXIT_NO_RESULT, err=f"{cause}。{MAY_HAVE_GONE_OUT}")
     return _outcome(response, timeout=timeout, as_json=as_json)
 
 
 def _outcome(response: requests.Response, *, timeout: float, as_json: bool) -> SendOutcome:
     status = response.status_code
-    raw = response.text if as_json and response.content else ""
-    shown = raw.rstrip("\n") if raw else ""
+    shown = response.text.rstrip("\n") if as_json else ""
     if 200 <= status < 300:
         return _from_result(response, shown, as_json=as_json)
     if status in (401, 403):

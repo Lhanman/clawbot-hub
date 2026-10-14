@@ -452,11 +452,11 @@ def main(argv: list[str] | None = None) -> int:
         message_ids=not args.no_message_id,
         close_after_response=args.close_after_response,
     )
+    stop = threading.Event()
+    for sig in (signal.SIGINT, signal.SIGTERM):  # 先接信号再报"在听了"：看到那一行就能放心地停它
+        signal.signal(sig, lambda *_: stop.set())
     fake.start()
     print(f"fake_ilink listening on {fake.base_url}", flush=True)
-    stop = threading.Event()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(sig, lambda *_: stop.set())
     stop.wait()
     fake.stop()
     return 0

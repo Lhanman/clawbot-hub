@@ -29,8 +29,9 @@ def config_lines(
 ) -> Iterable[str]:
     """`file` 是读的那份配置文件（可能不存在，不存在时全部用内置默认值）。"""
     yield f"配置文件：{file}" if exists else f"配置文件：{file}（没有这个文件，全部用内置默认值）"
-    last_alerts = max((name for name in config.flat() if name.startswith("alerts.")), default=None)
-    for name, value in config.flat().items():
+    settings = config.flat()
+    last_alerts = [name for name in settings if name.startswith("alerts.")][-1]
+    for name, value in settings.items():
         yield f"{name}: {_value_text(value)}"
         if name == last_alerts:
             yield key_summary(key)

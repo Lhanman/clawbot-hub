@@ -10,9 +10,7 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import sqlite3
-import stat
 import time
 from datetime import datetime
 from pathlib import Path
@@ -28,28 +26,14 @@ from clawbot_hub.db import Database, migrate
 from clawbot_hub.paths import ensure_home
 from clawbot_hub.projects import Projects
 from clawbot_hub.quota import Quota
-from tests.cli.conftest import json_of
+from tests.cli.conftest import KEY, add, db_text, json_of, mode_of, write_run_json
 from tests.login.conftest import account_file, dead_pid
 from tests.quota.conftest import REJECTED, reserve, settle, speak
 from tests.support.fake_upstream import QR_STATUS
 
-KEY = re.compile(r"chub_[A-Za-z0-9_-]{43}")
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 MINUTE = 60_000
 HOUR = 60 * MINUTE
-
-
-def mode_of(path: Path) -> int:
-    return stat.S_IMODE(path.stat().st_mode)
-
-
-def add(run, name: str, *extra: str, prefix: str | None = "量化", guaranteed=2, cap=4, input=None):
-    """登记一个项目的命令行（没给前缀的项目要自己带 `--push-only`）。"""
-    argv = ["project", "add", name]
-    if prefix is not None:
-        argv += ["--prefix", prefix]
-    argv += ["--guaranteed", str(guaranteed), "--cap", str(cap), *extra]
-    return run(*argv, input=input)
 
 
 @pytest.fixture
@@ -65,30 +49,6 @@ def empty_database(hub_paths, clock, display_tz):
 @pytest.fixture
 def quota(clock) -> Quota:
     return Quota(Config(), clock)
-
-
-def write_run_json(hub_paths, clock, **overrides) -> None:
-    info = {
-        "pid": os.getpid(),
-        "last_heartbeat_ms": clock.now_ms() - 20_000,
-        "started_ms": clock.now_ms() - HOUR - 5 * MINUTE,
-        "version": "0.1.0",
-        "listen": "127.0.0.1:8790",
-        "profile": "legacy",
-        "confirm": "observe",
-    }
-    info.update(overrides)
-    hub_paths.run.write_text(json.dumps(info), encoding="utf-8")
-
-
-def db_text(hub_paths) -> bytes:
-    """数据库文件和它的日志文件里的全部字节（找密钥用）。"""
-    blobs = []
-    for suffix in ("", "-wal", "-shm"):
-        path = hub_paths.db.with_name(hub_paths.db.name + suffix)
-        if path.exists():
-            blobs.append(path.read_bytes())
-    return b"\n".join(blobs)
 
 
 # ---------------------------------------------------------------- 公共约定：数据目录

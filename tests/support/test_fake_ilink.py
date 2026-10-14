@@ -81,6 +81,25 @@ def test_unknown_paths_are_404_and_not_recorded(fake):
     assert fake.requests == []
 
 
+def test_the_root_address_is_recorded_answers_404_and_can_be_scripted(fake):
+    """`hubctl doctor --online` 不带凭证访问根地址，要看得到这次访问。"""
+    first = requests.get(f"{fake.base_url}/", timeout=3)
+    fake.set_default(fi.ROOT, fi.http_status(502))
+    second = requests.get(f"{fake.base_url}/", timeout=3)
+
+    assert (first.status_code, second.status_code) == (404, 502)
+    visits = fake.requests_to(fi.ROOT)
+    assert [(r.method, r.path) for r in visits] == [("GET", "/"), ("GET", "/")]
+    assert visits[0].header("Authorization") is None
+
+
+def test_the_root_address_is_not_one_of_the_bot_token_endpoints(fake):
+    assert fi.ROOT in fi.ENDPOINTS and fi.ROOT not in fi.BOT_TOKEN_ENDPOINTS
+    fake.set_mode("session_expired")
+
+    assert requests.get(f"{fake.base_url}/", timeout=3).status_code == 404
+
+
 # ---------------------------------------------------------------- 记录
 
 

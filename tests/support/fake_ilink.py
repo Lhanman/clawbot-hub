@@ -61,10 +61,22 @@ GET_BOT_QRCODE = "get_bot_qrcode"
 GET_QRCODE_STATUS = "get_qrcode_status"
 NOTIFYSTART = "notifystart"
 NOTIFYSTOP = "notifystop"
-ENDPOINTS = (GETUPDATES, SENDMESSAGE, GET_BOT_QRCODE, GET_QRCODE_STATUS, NOTIFYSTART, NOTIFYSTOP)
+# 根地址 `/`：`hubctl doctor --online` 不带凭证访问它，只看连得上连不上。默认回一个 404 页面
+# （真实的服务根地址回什么不重要），编排时和别的端点一样用
+ROOT = "root"
+API_ENDPOINTS = (
+    GETUPDATES,
+    SENDMESSAGE,
+    GET_BOT_QRCODE,
+    GET_QRCODE_STATUS,
+    NOTIFYSTART,
+    NOTIFYSTOP,
+)
+ENDPOINTS = (*API_ENDPOINTS, ROOT)
 # 带着 bot_token 来的端点；`set_mode` 只影响这些（扫码要始终能用，否则掉线以后没法重新绑定）
 BOT_TOKEN_ENDPOINTS = (GETUPDATES, SENDMESSAGE, NOTIFYSTART, NOTIFYSTOP)
-_PATHS = {f"/ilink/bot/{name}": name for name in ENDPOINTS}
+_PATHS = {f"/ilink/bot/{name}": name for name in API_ENDPOINTS}
+_PATHS["/"] = ROOT
 # notifystart / notifystop 的真实路径规格里没写明（官方插件里似乎带一层 /msg）：两种都认，
 # 真机验证时再确定 `upstream/http.py` 该用哪个
 _PATHS["/ilink/bot/msg/notifystart"] = NOTIFYSTART
@@ -277,6 +289,7 @@ class FakeIlink(FakeHttp):
             GET_QRCODE_STATUS: self._get_qrcode_status,
             NOTIFYSTART: lambda _r: ok(),
             NOTIFYSTOP: lambda _r: ok(),
+            ROOT: lambda _r: Reply(status=404, body="<html><body>Not Found</body></html>"),
         }[endpoint]
         return handler(request)
 

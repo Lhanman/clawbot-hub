@@ -1,7 +1,8 @@
 """时间和时长的中文写法，状态、项目列表、原因文字共用。
 
 时刻按显示时区写成 `M月D日 HH:MM`（规格 `hub-send`「原因代码和原文」），秒是直接截掉不是四舍五入；
-给脚本看的 JSON 用带时区偏移的 ISO 8601，精确到秒。时长只写最大的两个单位。
+给脚本看的 JSON 用带时区偏移的 ISO 8601，精确到秒；清单里的列用 `年-月-日 时:分:秒`。
+时长只写最大的两个单位。
 """
 
 from __future__ import annotations
@@ -17,6 +18,11 @@ def moment_text(ms: int, tz: tzinfo) -> str:
     """`10月2日 09:05`：月和日不补零，时分补零。"""
     when = _at(ms, tz)
     return f"{when.month}月{when.day}日 {when:%H:%M}"
+
+
+def clock_text(ms: int, tz: tzinfo) -> str:
+    """`2026-10-12 18:30:15`：清单（事件记录）里一列一列对着看用，按显示时区。"""
+    return f"{_at(ms, tz):%Y-%m-%d %H:%M:%S}"
 
 
 def iso_text(ms: int, tz: tzinfo) -> str:

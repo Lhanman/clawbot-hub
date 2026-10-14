@@ -1,7 +1,7 @@
 """备份的核心：做一份能打开的一致性副本、三种命名、清理旧的自动备份。
 
-`hubctl backup` 命令（含 `--to` 的提示和云盘路径警告）留到 D3，按时间点触发的自动备份留到 D2，
-它们都调这里的函数。规格见 `hub-cli`「备份」。
+`hubctl backup` 命令（`cli.py`，含 `--to` 的提示和云盘路径警告）、按时间点触发的自动备份
+（`scheduler.py`）和 `hubctl doctor` 的"最近一次自动备份"都调这里的函数。规格见 `hub-cli`「备份」。
 
 备份里有登录凭证：目录 0700、文件 0600，创建时就是这个权限；已经存在的父目录不动它的权限。
 """
@@ -164,19 +164,38 @@ def make_backup(
     return BackupResult(destination, files)
 
 
+def auto_backup_names(parent: str | os.PathLike[str]) -> list[str]:
+    """`parent` 里自动备份的目录名（`auto-<时间>`，得是目录、不能是符号链接），按名字排，
+    也就是按时间，老的在前。手动的、升级前的、名字像但不是的都不算；目录不存在是空表。"""
+    parent = Path(parent)
+    if not parent.is_dir():
+        return []
+    return sorted(
+        entry.name
+        for entry in parent.iterdir()
+        if _AUTO.fullmatch(entry.name) and entry.is_dir() and not entry.is_symlink()
+    )
+
+
+def latest_auto_backup(parent: str | os.PathLike[str], tz: tzinfo) -> tuple[str, datetime] | None:
+    """最近一份自动备份：(目录名, 做备份的时刻)。时刻是目录名里的时间，按显示时区；
+    名字里的日期不存在的（`auto-20261340-…`）跳过。一份也没有是 `None`。"""
+    for name in reversed(auto_backup_names(parent)):
+        try:
+            when = datetime.strptime(name.removeprefix("auto-"), "%Y%m%d-%H%M%S")
+        except ValueError:
+            continue
+        return name, when.replace(tzinfo=tz)
+    return None
+
+
 def prune_auto_backups(parent: str | os.PathLike[str], keep: int) -> list[str]:
     """只留最近 `keep` 份自动备份（名字是 `auto-<时间>` 的目录，按名字排）；别的不动
     （手动的、升级前的、名字像但不是的）。返回被删掉的目录名。"""
     if keep < 1:
         raise ValueError("至少要保留 1 份")
     parent = Path(parent)
-    if not parent.is_dir():
-        return []
-    names = sorted(
-        entry.name
-        for entry in parent.iterdir()
-        if _AUTO.fullmatch(entry.name) and entry.is_dir() and not entry.is_symlink()
-    )
+    names = auto_backup_names(parent)
     doomed = names[:-keep]
     for name in doomed:
         shutil.rmtree(parent / name)

@@ -22,7 +22,9 @@
 - 被拒的那条发在旧窗口、现在窗口已经换了（或被作废）：不记暂停，新窗口不受牵连；
 - 暂停期里又有一条先前预占的推送被拒：以最近这次为准重新计时；
 - 试探的结果只看第一段（`Probe.resolved` 防止后面几段再动暂停），且只改仍等于临时截止的那一行；
-- 每次暂停的开始、试探、解除都写一条 `hold` 事件，没有正文和凭证。
+- 每次暂停的开始、试探、解除都写一条 `hold` 事件，没有正文和凭证；
+- 使用者发话开出新窗口时，告警状态表里"没收到过消息已经告警过"的那一条（`NONE_WINDOW_KEY`）
+  同一个事务里清掉（`hub-alerts`「去重要记下来」）：那一段"没收到过消息"结束了，以后再遇到可以再告警。
 """
 
 from __future__ import annotations
@@ -42,6 +44,11 @@ PRIORITIES = ("urgent", "normal", "deferrable")
 
 HOUR_MS = 3_600_000
 MINUTE_MS = 60_000
+
+# 告警状态表里"这个窗口已经为推送被拒告警过"的标记，键是 `window_blocked:<窗口编号>`；没有窗口时
+# 用固定的 `none`（`NONE_WINDOW_KEY`）。写和清标记的是 `alerts`、`retention` 和这里的 `open_window`
+WINDOW_MARKER_PREFIX = "window_blocked:"
+NONE_WINDOW_KEY = WINDOW_MARKER_PREFIX + "none"
 
 # 服务重启时把"发送中"的记录标成"中断"所用的原因（`hub-send`「原因代码和原文」）
 INTERRUPTED_CODE = "interrupted"
@@ -294,7 +301,8 @@ class Quota:
     ) -> int | None:
         """使用者的一条消息到达：开新窗口，返回它的编号。时间早于当前窗口起点的消息（补收的旧消息）
         不倒回窗口，返回 `None`；起点相同的照样开新窗口。被取代的窗口不再留着对话凭证。
-        当前窗口还挂着暂停的话，新窗口就是它的解除，写一条 `hold` 事件。"""
+        当前窗口还挂着暂停的话，新窗口就是它的解除，写一条 `hold` 事件。开出新窗口也结束了
+        "从没收到过消息"那一段，告警的"没有窗口"标记在同一个事务里清掉。"""
         current = self.current_window(conn)
         if current is not None and started_ms < current.started_ms:
             return None
@@ -307,6 +315,7 @@ class Quota:
             "UPDATE windows SET context_token = NULL WHERE id != ? AND context_token IS NOT NULL",
             (window_id,),
         )
+        conn.execute("DELETE FROM alert_state WHERE key = ?", (NONE_WINDOW_KEY,))
         if current is not None and current.blocked_until_ms is not None:
             add_event(conn, self._clock.now_ms(), "hold", "使用者发来新消息，开了新窗口，暂停解除")
         return window_id

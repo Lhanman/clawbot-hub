@@ -6,7 +6,8 @@
 
 **在不在运行**：一律看 `run.json`（服务每 30 秒写一次心跳），不去试拿 `hub.lock`——试拿的一瞬间会让
 正在启动的服务误以为已经有一个在运行。里面的进程号对应的进程还在、最后心跳不超过 60 秒前、
-而且没有标记"正常退出"，才算在运行。
+而且没有标记"正常退出"，才算在运行。`run.json` 由 `RunRecorder` 写（启动写一份、定时任务更新心跳、
+正常退出时标记）。
 
 规格：`hub-login`「单实例」、`hub-cli`、`hub-deploy`「数据目录和权限」（`run.json` 的字段）。
 """
@@ -16,11 +17,13 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import threading
 from dataclasses import dataclass
 from types import TracebackType
 from typing import Any
 
 from clawbot_hub.clock import Clock
+from clawbot_hub.fileio import write_private
 from clawbot_hub.paths import FILE_MODE, HubPaths
 
 # `run.json` 的心跳超过这么久没更新，就当服务没在运行（心跳每 30 秒一次）
@@ -148,3 +151,62 @@ def service_running(paths: HubPaths, clock: Clock) -> RunInfo | None:
     if clock.now_ms() - info.last_heartbeat_ms > HEARTBEAT_STALE_SECONDS * 1000:
         return None
     return info
+
+
+class RunRecorder:
+    """写 `run.json`：服务每次启动写一份新的（`start`），定时任务每个周期（30 秒）更新一次心跳
+    （`beat`），正常退出时标上"正常退出"（`finish`）。
+
+    `hubctl` 用它判断服务在不在运行（`service_running`），下次启动用它判断上一次是不是正常退出、
+    最后一次心跳是什么时候（`service_restarted` 告警）。每次都是先写临时文件再改名，读的一方永远
+    读到完整的一份；文件创建时就是 0600。`start` 之前和 `finish` 之后的 `beat` 什么也不做
+    （停服务时定时任务线程可能比主线程慢一步，不能把"正常退出"改回去）。
+    """
+
+    def __init__(
+        self,
+        paths: HubPaths,
+        clock: Clock,
+        *,
+        version: str,
+        listen: str,
+        profile: str,
+        confirm: str,
+    ) -> None:
+        self._paths = paths
+        self._clock = clock
+        self._fixed = {"version": version, "listen": listen, "profile": profile, "confirm": confirm}
+        self._lock = threading.Lock()
+        self._started_ms: int | None = None
+        self._finished = False
+
+    def start(self) -> None:
+        with self._lock:
+            self._started_ms = self._clock.now_ms()
+            self._finished = False
+            self._write(clean_exit=False, durable=True)
+
+    def beat(self) -> None:
+        with self._lock:
+            if self._started_ms is None or self._finished:
+                return
+            self._write(clean_exit=False, durable=False)
+
+    def finish(self) -> None:
+        with self._lock:
+            if self._started_ms is None or self._finished:
+                return
+            self._finished = True
+            self._write(clean_exit=True, durable=True)
+
+    def _write(self, *, clean_exit: bool, durable: bool) -> None:
+        record = {
+            "pid": os.getpid(),
+            "started_ms": self._started_ms,
+            **self._fixed,
+            "last_heartbeat_ms": self._clock.now_ms(),
+            "clean_exit": clean_exit,
+        }
+        write_private(
+            self._paths.run, json.dumps(record, ensure_ascii=False) + "\n", durable=durable
+        )

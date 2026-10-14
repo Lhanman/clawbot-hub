@@ -23,7 +23,9 @@ import hmac
 import re
 import secrets
 import sqlite3
+from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import Protocol
 
 from clawbot_hub.clock import Clock
 from clawbot_hub.config import Config
@@ -174,7 +176,46 @@ def is_online(project: Project, now_ms: int, online_seconds: int) -> bool:
     return last is not None and now_ms - last <= online_seconds * 1000
 
 
-def _prefix_reminder(prefix: str) -> str:
+class Guaranteeing(Protocol):
+    """算保底合计要用到的三项：`Project` 和 `status.ProjectRow` 都有。"""
+
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def guaranteed(self) -> int: ...
+
+    @property
+    def enabled(self) -> bool: ...
+
+
+@dataclass(frozen=True)
+class GuaranteeTotal:
+    """启用着的项目的保底合计，和窗口总条数的关系（`hubctl status` 的提示、`hubctl doctor` 用）。"""
+
+    total: int
+    reserve: int  # 回复保留
+    limit: int  # 窗口总条数
+    listing: str  # 各项目的保底，`seed 6、beta 5`；没有启用的项目是空串
+
+    @property
+    def excess(self) -> int:
+        """超出窗口总条数多少条；没超是 0。"""
+        return max(0, self.total + self.reserve - self.limit)
+
+
+def guarantee_total(projects: Iterable[Guaranteeing], config: Config) -> GuaranteeTotal:
+    """已停用的项目不占保底。"""
+    holding = [project for project in projects if project.enabled]
+    return GuaranteeTotal(
+        total=sum(project.guaranteed for project in holding),
+        reserve=config.quota.reply_reserve,
+        limit=config.quota.window_limit,
+        listing="、".join(f"{project.name} {project.guaranteed}" for project in holding),
+    )
+
+
+def prefix_reminder(prefix: str) -> str:
     return (
         f"提醒：服务分不清默认项目自己的指令里有没有和前缀「{prefix}」同名的词。例如前缀取"
         "「状态」，默认项目整句「状态」就会被交给这个项目；请自己确认。"
@@ -294,7 +335,7 @@ class Projects:
             project = _project(
                 conn.execute("SELECT * FROM projects WHERE id = ?", (cursor.lastrowid,)).fetchone()
             )
-        notes = () if prefix is None else (_prefix_reminder(prefix),)
+        notes = () if prefix is None else (prefix_reminder(prefix),)
         return Registration(
             project=project,
             key=key,

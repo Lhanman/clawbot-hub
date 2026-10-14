@@ -20,7 +20,9 @@ import pytest
 from clawbot_hub import backup
 from clawbot_hub.backup import (
     BackupError,
+    auto_backup_names,
     backup_name,
+    latest_auto_backup,
     make_backup,
     prune_auto_backups,
     timestamp,
@@ -428,6 +430,57 @@ def test_symbolic_links_with_a_backup_name_are_neither_counted_nor_removed(tmp_p
 def test_keep_must_be_at_least_one(tmp_path):
     with pytest.raises(ValueError):
         prune_auto_backups(tmp_path, 0)
+
+
+def test_auto_backup_names_are_the_real_ones_oldest_first(tmp_path):
+    parent = tmp_path / "backups"
+    make_fake_backup_dirs(
+        parent,
+        ["auto-20261003-040000", "auto-20261001-040000", "20261002-040000", "auto-latest"]
+        + ["pre-upgrade-v1-v2-20261001-000000"],
+    )
+    (parent / "auto-20261004-040000").write_text("a file")
+    (parent / "auto-20261005-040000").symlink_to(parent / "auto-20261001-040000")
+
+    assert auto_backup_names(parent) == ["auto-20261001-040000", "auto-20261003-040000"]
+
+
+def test_auto_backup_names_of_a_missing_directory_is_empty(tmp_path):
+    assert auto_backup_names(tmp_path / "nope") == []
+
+
+def test_the_latest_auto_backup_is_the_one_with_the_newest_name_and_its_time_is_in_that_zone(
+    tmp_path,
+):
+    parent = tmp_path / "backups"
+    make_fake_backup_dirs(parent, auto_names(3) + ["20261009-101010"])
+    shanghai = ZoneInfo("Asia/Shanghai")
+
+    name, when = latest_auto_backup(parent, shanghai)
+
+    assert name == "auto-20261003-040000"
+    assert when.tzinfo is shanghai
+    assert (when.year, when.month, when.day, when.hour, when.minute, when.second) == (
+        2026, 10, 3, 4, 0, 0,
+    )  # fmt: skip
+    assert when.isoformat() == "2026-10-03T04:00:00+08:00"
+
+
+def test_the_latest_auto_backup_skips_names_with_dates_that_do_not_exist(tmp_path):
+    parent = tmp_path / "backups"
+    make_fake_backup_dirs(parent, ["auto-20261002-040000", "auto-20261340-040000"])
+
+    name, _ = latest_auto_backup(parent, ZoneInfo("Asia/Shanghai"))
+
+    assert name == "auto-20261002-040000"
+
+
+def test_no_auto_backup_at_all_is_none(tmp_path):
+    parent = tmp_path / "backups"
+    make_fake_backup_dirs(parent, ["20261002-040000"])
+
+    assert latest_auto_backup(parent, ZoneInfo("Asia/Shanghai")) is None
+    assert latest_auto_backup(tmp_path / "nope", ZoneInfo("Asia/Shanghai")) is None
 
 
 def test_the_newest_is_decided_by_the_name_not_by_file_dates(tmp_path):

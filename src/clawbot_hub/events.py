@@ -9,9 +9,14 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import dataclass
+from datetime import tzinfo
+
+from clawbot_hub.timefmt import clock_text, iso_text
 
 KINDS = ("login", "alert", "send", "hold", "project", "queue", "backup", "lifecycle")
 LEVELS = ("INFO", "WARNING", "ERROR")
+DEFAULT_LIMIT = 50  # `hubctl events` 不带 `--limit` 时列几条（规格定死的数）
 
 
 def add_event(
@@ -34,3 +39,44 @@ def add_event(
         "INSERT INTO events (ts_ms, level, kind, project, detail) VALUES (?, ?, ?, ?, ?)",
         (ts_ms, level, kind, project, detail),
     )
+
+
+@dataclass(frozen=True)
+class EventRow:
+    """库里的一条事件，给 `hubctl events` 列出来。"""
+
+    id: int
+    ts_ms: int
+    level: str
+    kind: str
+    project: str | None
+    detail: str
+
+    def line(self, tz: tzinfo) -> str:
+        """`时间  级别  种类  项目  一句话`，列之间两个空格，没有项目写 `-`。"""
+        columns = (clock_text(self.ts_ms, tz), self.level, self.kind, self.project or "-")
+        return "  ".join((*columns, self.detail))
+
+    def to_json(self, tz: tzinfo) -> dict[str, object]:
+        return {
+            "id": self.id,
+            "time": iso_text(self.ts_ms, tz),
+            "level": self.level,
+            "kind": self.kind,
+            "project": self.project,
+            "detail": self.detail,
+        }
+
+
+def recent_events(
+    conn: sqlite3.Connection, *, limit: int = DEFAULT_LIMIT, kind: str | None = None
+) -> list[EventRow]:
+    """最近的 `limit` 条（可以只挑一个种类），旧的在前、新的在后；同一时刻的按写入先后。"""
+    sql, args = "SELECT id, ts_ms, level, kind, project, detail FROM events", []
+    if kind is not None:
+        sql, args = sql + " WHERE kind = ?", [kind]
+    rows = conn.execute(sql + " ORDER BY ts_ms DESC, id DESC LIMIT ?", [*args, limit]).fetchall()
+    return [
+        EventRow(r["id"], r["ts_ms"], r["level"], r["kind"], r["project"], r["detail"] or "")
+        for r in reversed(rows)
+    ]

@@ -13,7 +13,7 @@ import pytest
 
 from clawbot_hub.backup import make_backup
 from clawbot_hub.db import connect, migrate
-from clawbot_hub.paths import HubPaths, fix_permissions
+from clawbot_hub.paths import HubPaths, WidePermission, fix_permissions, wide_permissions
 
 
 def mode(path: Path) -> int:
@@ -175,3 +175,32 @@ def test_the_data_directory_itself_is_covered(paths):
     paths.home.chmod(0o755)
     assert fix_permissions(paths) == [paths.home]
     assert mode(paths.home) == 0o700
+
+
+# ---------------------------------------------------------------- 只看不改（doctor 用）
+
+
+def test_the_scan_lists_what_fixing_would_change_and_changes_nothing(paths):
+    loose = make_loose_house(paths)
+
+    found = wide_permissions(paths)
+
+    assert sorted(item.path for item in found) == sorted(loose)
+    for item in found:
+        assert mode(item.path) in (0o644, 0o755)  # 一个字节都没改
+        assert item.wanted == (0o700 if item.path.is_dir() else 0o600)
+        assert item.mode == mode(item.path)
+
+
+def test_the_scan_says_what_the_mode_is_and_what_it_should_be(paths):
+    paths.account.write_text("x")
+    paths.account.chmod(0o640)
+
+    assert wide_permissions(paths) == [WidePermission(paths.account, 0o640, 0o600)]
+
+
+def test_the_scan_finds_nothing_in_a_tidy_house(paths):
+    paths.account.write_text("x")
+    paths.account.chmod(0o600)
+
+    assert wide_permissions(paths) == []

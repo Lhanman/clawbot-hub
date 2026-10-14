@@ -87,12 +87,32 @@ def is_busy(exc: sqlite3.Error) -> bool:
 
 
 def connect(
-    path: str | os.PathLike[str], *, busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS
+    path: str | os.PathLike[str],
+    *,
+    busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS,
+    read_only: bool = False,
 ) -> sqlite3.Connection:
     """打开一个连接并设好：自动提交（事务由 `Database.txn` 显式开）、按列名取值、WAL、
     外键、`secure_delete`、`busy_timeout`。文件不存在就先以 0600 建出来（SQLite 随后建的
-    `-wal`、`-shm` 跟着它的权限）。可以在别的线程里用和关闭，但同一时刻只让一个线程用。"""
+    `-wal`、`-shm` 跟着它的权限）。可以在别的线程里用和关闭，但同一时刻只让一个线程用。
+
+    `read_only=True`：只读着打开已有的文件，什么也不建、不改（连接关闭时也不会合并 WAL 日志），
+    给只看不改的检查用（`hubctl doctor`）；文件不存在抛 `sqlite3.OperationalError`。"""
     path = Path(path)
+    if read_only:
+        conn = sqlite3.connect(
+            f"{path.absolute().as_uri()}?mode=ro",
+            uri=True,
+            isolation_level=None,
+            check_same_thread=False,
+        )
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
+        except BaseException:
+            conn.close()
+            raise
+        return conn
     fd = os.open(path, os.O_CREAT | os.O_WRONLY, FILE_MODE)  # 已经有的不动，也不截断
     os.close(fd)
     conn = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
@@ -112,13 +132,18 @@ class Database:
     """一个数据库文件，每个线程各用各的连接（线程第一次要的时候才建）。
 
     `conn()` 取当前线程的连接；`txn()` 开一个写事务。服务关闭时调 `close()`，
-    所有线程的连接一起关掉。"""
+    所有线程的连接一起关掉。`read_only=True` 时只读着开已有的文件（见 `connect`），写事务会失败。"""
 
     def __init__(
-        self, path: str | os.PathLike[str], *, busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS
+        self,
+        path: str | os.PathLike[str],
+        *,
+        busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS,
+        read_only: bool = False,
     ) -> None:
         self._path = Path(path)
         self._busy_timeout_ms = busy_timeout_ms
+        self._read_only = read_only
         self._local = threading.local()
         self._lock = threading.Lock()
         self._open: list[tuple[threading.Thread, sqlite3.Connection]] = []
@@ -134,7 +159,9 @@ class Database:
             if self._closed:
                 raise RuntimeError("数据库已经关闭")
             self._drop_connections_of_finished_threads()
-            fresh = connect(self._path, busy_timeout_ms=self._busy_timeout_ms)
+            fresh = connect(
+                self._path, busy_timeout_ms=self._busy_timeout_ms, read_only=self._read_only
+            )
             self._open.append((threading.current_thread(), fresh))
         self._local.conn = fresh
         return fresh
@@ -258,6 +285,27 @@ def read_version(conn: sqlite3.Connection) -> int:
     if not _VERSION_TEXT.fullmatch(text):
         raise DatabaseCorrupt(f"数据库里的版本号读不懂（{text!r}），不敢动它。")
     return int(text)
+
+
+def latest_version() -> int:
+    """这个程序认识的最新的数据库版本（自带迁移脚本里最大的编号）。"""
+    return load_migrations()[-1].version
+
+
+def stored_version(path: Path, busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS) -> int | None:
+    """库文件里记的版本号：文件不存在是 `None`，一张表都没有是 0。只看一眼，不改动它，也不做
+    完整性检查（`hubctl version` 用）；读不懂（不是数据库、不是本服务的库）抛 `DatabaseCorrupt`。"""
+    if not path.exists():
+        return None
+    conn = sqlite3.connect(path, timeout=busy_timeout_ms / 1000, isolation_level=None)
+    try:
+        return read_version(conn)
+    except sqlite3.DatabaseError as exc:
+        if is_busy(exc):
+            raise
+        raise DatabaseCorrupt("这个文件不是 SQLite 数据库，读不懂。") from exc
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------- 迁移

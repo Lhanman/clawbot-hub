@@ -17,6 +17,7 @@ from __future__ import annotations
 import dataclasses
 import itertools
 import sqlite3
+from collections.abc import Callable
 from typing import Any
 
 from clawbot_hub.account import AccountFile, AccountStore
@@ -50,8 +51,13 @@ class Hub:
         clock,
         upstream,
         config: Config | None = None,
+        *,
+        on_expired: Callable[[int], None] | None = None,
+        on_restored: Callable[[int], None] | None = None,
         **sender_kwargs: Any,
     ) -> None:
+        """`on_expired`、`on_restored` 是登录监视器的回调（告警测试接进来用）；`hub.expired`、
+        `hub.restored` 两个列表照旧记着每一次回调。"""
         self.paths = paths
         self.db = database
         self.clock = clock
@@ -62,13 +68,24 @@ class Hub:
         self.restored: list[int] = []
         self.holds: list = []
         self.keys: dict[str, str] = {}
+
+        def expired_hook(episode: int) -> None:
+            self.expired.append(episode)
+            if on_expired is not None:
+                on_expired(episode)
+
+        def restored_hook(episode: int) -> None:
+            self.restored.append(episode)
+            if on_restored is not None:
+                on_restored(episode)
+
         self.monitor = LoginMonitor(
             paths,
             database,
             self.store,
             clock,
-            on_expired=self.expired.append,
-            on_restored=self.restored.append,
+            on_expired=expired_hook,
+            on_restored=restored_hook,
         )
         self.projects = Projects(database, self.config, clock)
         self.quota = Quota(self.config, clock)

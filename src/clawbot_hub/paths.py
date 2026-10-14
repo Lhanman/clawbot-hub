@@ -104,22 +104,29 @@ def _too_wide(path: Path) -> bool:
     return bool(stat.S_IMODE(path.lstat().st_mode) & 0o077)
 
 
-def _tighten(path: Path, mode: int, fixed: list[Path]) -> None:
+@dataclass(frozen=True)
+class WidePermission:
+    """一个权限比规定的宽的文件或目录：现在是多少、应该是多少。"""
+
+    path: Path
+    mode: int
+    wanted: int
+
+
+def _check(path: Path, wanted: int, found: list[WidePermission]) -> None:
     if path.is_symlink() or not path.exists():
         return
     if _too_wide(path):
-        path.chmod(mode)
-        fixed.append(path)
+        found.append(WidePermission(path, stat.S_IMODE(path.lstat().st_mode), wanted))
 
 
-def fix_permissions(paths: HubPaths) -> list[Path]:
-    """已有的文件和目录权限比规定的宽（组或其他人有权限）就改回：目录 0700、文件 0600。
+def wide_permissions(paths: HubPaths) -> list[WidePermission]:
+    """已有的文件和目录里权限比规定的宽（组或其他人有权限）的：目录规定 0700、文件 0600。
 
-    返回改过的路径，调用者（启动、`hubctl doctor --fix`）逐条写警告。不存在的、符号链接、
-    本来就更严的都不动。覆盖数据目录本身、下面登记过名字的文件、`logs/` 和 `backups/` 里的
-    全部内容。"""
-    fixed: list[Path] = []
-    _tighten(paths.home, DIR_MODE, fixed)
+    不存在的、符号链接、本来就更严的都不算。覆盖数据目录本身、下面登记过名字的文件、`logs/` 和
+    `backups/` 里的全部内容。只看不改（`hubctl doctor` 用）；改回去用 `fix_permissions`。"""
+    found: list[WidePermission] = []
+    _check(paths.home, DIR_MODE, found)
     db = paths.db
     for path in (
         paths.account,
@@ -134,14 +141,25 @@ def fix_permissions(paths: HubPaths) -> list[Path]:
         paths.login_png,
         paths.login_pending,
     ):
-        _tighten(path, FILE_MODE, fixed)
+        _check(path, FILE_MODE, found)
     for tree in (paths.logs, paths.backups):
         if tree.is_symlink() or not tree.is_dir():
             continue
-        _tighten(tree, DIR_MODE, fixed)
+        _check(tree, DIR_MODE, found)
         for root, dirs, files in os.walk(tree):
             for name in dirs:
-                _tighten(Path(root, name), DIR_MODE, fixed)
+                _check(Path(root, name), DIR_MODE, found)
             for name in files:
-                _tighten(Path(root, name), FILE_MODE, fixed)
+                _check(Path(root, name), FILE_MODE, found)
+    return found
+
+
+def fix_permissions(paths: HubPaths) -> list[Path]:
+    """`wide_permissions` 找到的都改回：目录 0700、文件 0600。
+
+    返回改过的路径，调用者（启动、`hubctl doctor --fix`）逐条写警告。"""
+    fixed: list[Path] = []
+    for item in wide_permissions(paths):
+        item.path.chmod(item.wanted)
+        fixed.append(item.path)
     return fixed

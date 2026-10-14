@@ -12,25 +12,27 @@
 - 窗口里的"已用"只在窗口开着时有数，过期或没有窗口都是 0（下一次使用者说话开新窗口，从 0 起）；
   条数里的推送包括内部名字 `_import` 名下的，回复包括 `_hub` 名下的；
 - 在线只看库（`projects.is_online`）；
-- "提示"现在有三条：窗口快到期（按 `alerts.window_warn.hours_before`，`enabled` 关了就不提示）、
-  配置文件比运行中的服务启动得晚、保底合计加回复保留超过窗口总条数；没配告警设备码这一条等告警模块
-  （D2）有了设备码的读法再加。
+- "提示"有四条，按这个先后：没配告警设备码（或配置有误）、窗口快到期（按
+  `alerts.window_warn.hours_before`，`enabled` 关了就不提示）、配置文件比运行中的服务启动得晚、
+  保底合计加回复保留超过窗口总条数。
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, tzinfo
 from typing import Any
 
 from clawbot_hub.account import AccountFile, AccountFileError, AccountStore
+from clawbot_hub.bark import lookup_bark_key
 from clawbot_hub.clock import Clock
 from clawbot_hub.config import Config
 from clawbot_hub.db import Database
 from clawbot_hub.instance import RunInfo, service_running
 from clawbot_hub.loginstate import read_login
 from clawbot_hub.paths import HubPaths
-from clawbot_hub.projects import Project, Projects, is_online
+from clawbot_hub.projects import Project, Projects, guarantee_total, is_online
 from clawbot_hub.quota import HOUR_MS, Quota, Window, closed_reason, window_ends_ms
 from clawbot_hub.timefmt import iso_text, moment_text, span_text
 
@@ -201,6 +203,16 @@ def collect_projects(
     return [_project_row(p, per_project.get(p.name, (0, 0)), config, now) for p in listed]
 
 
+def collect_project(
+    db: Database, config: Config, clock: Clock, name: str
+) -> tuple[Project, ProjectRow]:
+    """`project show` 要的一个项目（含已移除的）；没有就抛 `ProjectNotFound`。"""
+    project = Projects(db, config, clock).get(name)
+    _, _, per_project, _, _ = _current_window(db, config, clock)
+    row = _project_row(project, per_project.get(project.name, (0, 0)), config, clock.now_ms())
+    return project, row
+
+
 def _service(paths: HubPaths, clock: Clock) -> tuple[ServiceView, RunInfo | None]:
     info = service_running(paths, clock)
     if info is None:
@@ -220,13 +232,14 @@ def _service(paths: HubPaths, clock: Clock) -> tuple[ServiceView, RunInfo | None
     return view, info
 
 
-def _read_account(paths: HubPaths) -> tuple[AccountFile | None, bool]:
-    """(凭证, 是不是读不出来)。文件不存在就不去碰锁文件，免得只看一眼也在数据目录里留下东西。"""
+def read_account(paths: HubPaths) -> tuple[AccountFile | None, bool]:
+    """(凭证, 是不是读不出来)。文件不存在就不去碰锁文件，免得只看一眼也在数据目录里留下东西。
+    文件内容不对和锁文件打不开（权限不对）都算读不出来。`hubctl doctor` 也用它。"""
     if not paths.account.exists():
         return None, False
     try:
         return AccountStore(paths).read(), False
-    except AccountFileError:
+    except (AccountFileError, OSError):
         return None, True
 
 
@@ -241,7 +254,7 @@ def _bound_at_ms(text: str, tz: tzinfo) -> int | None:
 
 
 def _login(paths: HubPaths, db: Database | None, tz: tzinfo) -> LoginView:
-    account, broken = _read_account(paths)
+    account, broken = read_account(paths)
     row = read_login(db.conn()) if db is not None else None
     if broken:
         state = "broken"
@@ -325,14 +338,47 @@ def _pending(db: Database | None) -> PendingView:
     )
 
 
+CONFIG_CHANGED = "配置文件改过，重启服务才生效"
+
+
+def config_changed_since_start(paths: HubPaths, run: RunInfo | None) -> bool:
+    """服务在运行，而且 `config.yaml` 是在它启动之后才改的（服务只在启动时读一次配置）。"""
+    if run is None or not run.started_ms:
+        return False
+    try:
+        changed_ms = int(paths.config.stat().st_mtime * 1000)
+    except OSError:
+        return False
+    return changed_ms > run.started_ms
+
+
+NO_ALERTS = "没有配置告警，服务出问题时不会通知你：运行 hubctl alerts set-key"
+
+
+def alert_key_hint(paths: HubPaths, environ: Mapping[str, str] | None) -> str | None:
+    """告警设备码没配好（没有，或者写得不对）时的一句提示，配好了是 `None`。"""
+    lookup = lookup_bark_key(paths, environ)
+    if lookup.key is not None:
+        return None
+    if lookup.problem is not None:
+        return (
+            f"告警设备码配置有误，服务出问题时不会通知你：{lookup.problem}（hubctl alerts set-key）"
+        )
+    return NO_ALERTS
+
+
 def _hints(
     window: WindowView,
     projects: list[ProjectRow],
     run: RunInfo | None,
     paths: HubPaths,
     config: Config,
+    environ: Mapping[str, str] | None,
 ) -> list[str]:
     found: list[str] = []
+    alerts = alert_key_hint(paths, environ)
+    if alerts is not None:
+        found.append(alerts)
     warn = config.alerts.window_warn
     if (
         warn.enabled
@@ -343,27 +389,23 @@ def _hints(
         found.append(
             f"对话窗口还剩不到 {warn.hours_before} 小时，快到期了：给 ClawBot 回一句话续期"
         )
-    if run is not None and run.started_ms:
-        try:
-            changed_ms = int(paths.config.stat().st_mtime * 1000)
-        except OSError:
-            changed_ms = 0
-        if changed_ms > run.started_ms:
-            found.append("配置文件改过，重启服务才生效")
-    holding = [p for p in projects if p.enabled]
-    total = sum(p.guaranteed for p in holding)
-    reserve, limit = config.quota.reply_reserve, config.quota.window_limit
-    if total + reserve > limit:
-        listing = "、".join(f"{p.name} {p.guaranteed}" for p in holding)
+    if config_changed_since_start(paths, run):
+        found.append(CONFIG_CHANGED)
+    guarantees = guarantee_total(projects, config)
+    if guarantees.excess:
         found.append(
-            f"保底合计 {total} 加上回复保留 {reserve} 超过窗口总条数 {limit}（{listing}）："
-            "服务照常运行，只是登记和启用项目会被拒绝"
+            f"保底合计 {guarantees.total} 加上回复保留 {guarantees.reserve} 超过窗口总条数 "
+            f"{guarantees.limit}（{guarantees.listing}）：服务照常运行，只是登记和启用项目会被拒绝"
         )
     return found
 
 
 def collect_status(
-    paths: HubPaths, config: Config, clock: Clock, db: Database | None
+    paths: HubPaths,
+    config: Config,
+    clock: Clock,
+    db: Database | None,
+    environ: Mapping[str, str] | None = None,
 ) -> StatusView:
     tz = config.display.tzinfo
     service, run = _service(paths, clock)
@@ -376,7 +418,7 @@ def collect_status(
         window=window_view,
         projects=projects,
         pending=_pending(db),
-        hints=_hints(window_view, projects, run, paths, config),
+        hints=_hints(window_view, projects, run, paths, config, environ),
     )
 
 
@@ -456,6 +498,28 @@ def project_line(row: ProjectRow, tz: tzinfo) -> str:
         f"本窗口已推送 {row.push_used} 条、回复 {row.reply_used} 条；"
         f"{'在线' if row.online else '离线'}；最后出现 {seen}"
     )
+
+
+def project_detail_lines(project: Project, row: ProjectRow, tz: tzinfo) -> list[str]:
+    """`project show` 的输出：名字一行，其余缩进两格、一项一行。"""
+    state = "已移除" if row.removed else "启用" if row.enabled else "已停用"
+    seen = "还没有" if row.last_seen_ms is None else moment_text(row.last_seen_ms, tz)
+    return [
+        row.name,
+        f"  前缀：{row.prefix or '无'}",
+        f"  默认项目：{'是' if row.is_default else '否'}",
+        f"  标签：{row.label or '无'}",
+        f"  保底：{row.guaranteed}，上限：{row.cap}",
+        f"  状态：{state}",
+        f"  类型：{'只推送' if row.push_only else '能收话'}",
+        f"  在线：{'在线' if row.online else '离线'}（最后出现 {seen}）",
+        f"  本窗口已用：推送 {row.push_used} 条、回复 {row.reply_used} 条",
+        f"  登记时间：{moment_text(project.created_ms, tz)}",
+    ]
+
+
+def project_detail_json(project: Project, row: ProjectRow, tz: tzinfo) -> dict[str, Any]:
+    return {**row.to_json(tz), "created": iso_text(project.created_ms, tz)}
 
 
 def _service_line(service: ServiceView) -> str:

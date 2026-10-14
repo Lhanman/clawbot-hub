@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -54,3 +55,12 @@ class Worker:
 
 def run_in_thread(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Worker:
     return Worker(fn, *args, **kwargs)
+
+
+def wait_for(predicate: Callable[[], bool], timeout: float = REAL_TIMEOUT) -> None:
+    """等一个条件成立（真实时间，最多 `timeout` 秒）：用在"别的线程在做事，看它做完没有"。"""
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() > deadline:
+            raise AssertionError(f"条件在 {timeout} 秒（真实时间）内没有成立")
+        time.sleep(0.002)

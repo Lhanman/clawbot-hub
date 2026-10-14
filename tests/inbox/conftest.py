@@ -19,6 +19,7 @@ import pytest
 from clawbot_hub.config import Config
 from clawbot_hub.inbox import Inbox
 from clawbot_hub.projects import Project, Projects
+from tests.poller.conftest import make_rig, rig  # noqa: F401  # 夹具：`test_no_body.py` 要走完 poller
 from tests.projects.conftest import register
 
 __all__ = ["World"]

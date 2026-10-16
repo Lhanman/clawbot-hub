@@ -87,6 +87,24 @@ def is_busy(exc: sqlite3.Error) -> bool:
 # ---------------------------------------------------------------- 连接
 
 
+def _make_if_missing(path: Path) -> None:
+    """库文件还不存在时，先以 0600 建出一个空的（SQLite 随后建的 `-wal`、`-shm` 跟着它的权限）。
+
+    已经有的文件**一次也不要打开再关闭**。POSIX 规定：一个进程对一个文件做任何一次 `close`，它在
+    这个文件上的所有锁就一起放掉，包括别的连接持有的。锁没了，别的进程（`hubctl status` 这类命令）
+    关库时会当自己是最后一个使用者，把还在被服务用着的 `-wal` 和 `-shm` 合并删掉，服务之后读写就报
+    `disk I/O error`、`database disk image is malformed`。服务里每个线程各开一个连接、线程是后来才
+    有的，所以这件事天天都会发生（任务 E1 核对安装说明时发现，测试见
+    `tests/db/test_shared_with_other_processes.py`）。"""
+    if path.exists():
+        return
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, FILE_MODE)
+    except FileExistsError:  # 别的线程或进程刚建好
+        return
+    os.close(fd)
+
+
 def connect(
     path: str | os.PathLike[str],
     *,
@@ -114,8 +132,7 @@ def connect(
             conn.close()
             raise
         return conn
-    fd = os.open(path, os.O_CREAT | os.O_WRONLY, FILE_MODE)  # 已经有的不动，也不截断
-    os.close(fd)
+    _make_if_missing(path)
     conn = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
     try:
         conn.row_factory = sqlite3.Row

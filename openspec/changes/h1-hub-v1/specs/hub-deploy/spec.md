@@ -260,6 +260,8 @@
 
 数据库是 SQLite（WAL 模式，外键打开，`busy_timeout` 为 `db.busy_timeout_ms`，默认 5000，每个连接 `secure_delete` 打开），库里有一张版本表。升级 MUST 只往前：按编号顺序执行 `clawbot_hub/migrations/` 里的脚本，每个脚本在一个事务里；升级之前先自动备份（命名 `pre-upgrade-v<旧版本>-v<新版本>-<时间>`，见 `hub-cli`）。启动时看到版本比程序新，退出码 3。
 
+服务在运行时，命令行照常要开库、关库（`hubctl status`、`doctor`、`project list`、`events`、`backup`、`version`……），MUST NOT 因此影响服务正在用的数据库。所以服务进程对已经有的库文件，除了 SQLite 的连接，MUST NOT 做任何一次普通的打开再关闭（POSIX 的规矩：一个进程关闭一个文件的任何一个文件描述符，就放掉它在这个文件上的全部锁，包括 SQLite 的连接持有的；锁没了，别的进程关库时会当自己是最后一个使用者，把服务还在用的 `-wal`、`-shm` 删掉，服务随后读写就是 `disk I/O error`）。库文件还不存在时才以 0600 建出来。
+
 数据留存（每天清理一次）：发送记录、事件、窗口记录、用量记录一律保留 `events.keep_days`（默认 90）天，删窗口时把发送记录里指向它的窗口编号置空；去重键从发送记录建立起占用 `send.dedupe_hours`（默认 24）小时，到点把去重摘要置空（发送记录本身按上面的期限删除）；待取记录和收消息的去重记录的留存见 `hub-inbox`。数据库里 MUST NOT 有 `bot_token`（它只在 `account.json` 里）；对话凭证只出现在窗口表和待取记录表里：窗口表里的在窗口过期、被新窗口取代或作废（重新绑定账号）时清掉，待取记录里的在回复句柄失效时清掉（见 `hub-inbox`）；项目密钥只存摘要。
 
 #### Scenario: 数据库里没有登录凭证
@@ -296,6 +298,11 @@
 
 - **WHEN** 一句含独特字符串的话被项目确认，之后做一次 `PRAGMA wal_checkpoint(TRUNCATE)`
 - **THEN** 数据库文件里搜不到这个字符串
+
+#### Scenario: 服务在跑时命令行开库、关库
+
+- **WHEN** 服务在运行，几个请求同时进来过（服务里每个请求线程各开了自己的库连接），然后依次运行 `hubctl status`、`doctor`、`project list`、`events`、`backup`、`version`，之后又同时来几个请求，再发一条消息；另一次是命令行登记了一个新项目，不重启服务就用它的密钥访问
+- **THEN** 每个命令退出码 0；`hub.db-wal` 和 `hub.db-shm` 在每个命令前后还是同一个文件（设备号和 inode 没变）；后来的请求都是 200，那条消息是 `sent`，新项目的密钥马上能用；日志和服务的输出里没有 ERROR；服务正常停止，退出码 0
 
 ### Requirement: 重启后的状态
 

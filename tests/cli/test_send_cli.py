@@ -16,8 +16,10 @@ import time
 
 import pytest
 import requests
+from typer.testing import CliRunner
 from urllib3.exceptions import MaxRetryError, NewConnectionError
 
+from clawbot_hub.cli import Env, app
 from clawbot_hub.sendcmd import never_sent, shown_address
 from tests.cli.conftest import mode_of
 from tests.support.fakehttp import (
@@ -249,6 +251,18 @@ def test_the_key_comes_from_the_default_environment_variable(run, server):
     send(run, server, "x")
 
     assert server.last().header("Authorization") == f"Bearer {KEY}"
+
+
+def test_the_key_is_read_from_the_environment_the_command_was_given(server, env, home):
+    """`Env.environ` 是命令碰到环境变量的那个口子：给了它，密钥就从它里面找，不看进程自己的
+    环境变量（那里放着另一把）。"""
+    given = Env(
+        clock=env.clock, upstream_factory=env.upstream_factory, environ={ENV_NAME: OTHER_KEY}
+    )
+
+    CliRunner().invoke(app, ["send", "--url", server.base_url, "x", "--home", str(home)], obj=given)
+
+    assert server.last().header("Authorization") == f"Bearer {OTHER_KEY}"
 
 
 def test_key_env_names_another_variable(run, server, monkeypatch):

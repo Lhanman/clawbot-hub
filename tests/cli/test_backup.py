@@ -81,6 +81,9 @@ def test_it_prints_the_folder_and_the_size_of_every_file_and_no_contents(run, fu
         for name in ("hub.db", "account.json", "config.yaml", "bark.json")
     }
     assert "TOKEN-IN-ACCOUNT" not in result.output and "KEY-IN-BARK" not in result.output
+    lines = result.stdout.splitlines()
+    assert lines[0] == f"备份完成：{folder}" and WARNING in lines[-1]
+    assert "" not in lines  # 事件记录写成了，就没有"没能写进"那一行，也不多一行空白
 
 
 def test_files_that_do_not_exist_are_skipped(run, database, hub_paths):
@@ -198,7 +201,8 @@ def test_a_backup_that_was_made_is_not_called_failed_just_because_the_event_coul
 
     assert result.exit_code == 0, result.output
     assert (full_home.backups / STAMP / "hub.db").is_file()
-    assert "没能写进事件记录" in result.output and WARNING in result.output
+    assert "（数据库正忙，这次备份没能写进事件记录）" in result.stdout
+    assert WARNING in result.output
     assert "手动备份完成" not in run("events", "--kind", "backup").stdout
 
 

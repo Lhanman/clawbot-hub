@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import sqlite3
 
@@ -83,6 +84,39 @@ def test_a_connection_that_cannot_be_set_up_is_closed_again(paths, monkeypatch):
     with pytest.raises(sqlite3.OperationalError, match="disk I/O"):
         connect(paths.db)
     assert closed == [True]
+
+
+def test_creating_the_file_does_not_leave_a_file_descriptor_open(paths, monkeypatch):
+    """先用 `os.open` 以 0600 建出文件，再交给 SQLite：自己开的那个描述符要还回去。"""
+    opened, closed = [], []
+    real_open, real_close = os.open, os.close
+
+    def spy_open(*args, **kwargs):
+        fd = real_open(*args, **kwargs)
+        opened.append(fd)
+        return fd
+
+    def spy_close(fd):
+        closed.append(fd)
+        return real_close(fd)
+
+    monkeypatch.setattr(os, "open", spy_open)
+    monkeypatch.setattr(os, "close", spy_close)
+
+    connect(paths.db).close()
+
+    assert opened and set(opened) <= set(closed)
+
+
+def test_a_connection_can_be_used_and_closed_from_another_thread(paths):
+    conn = connect(paths.db)
+    try:
+        assert run_in_thread(lambda: conn.execute("SELECT 1").fetchone()[0]).result() == 1
+        run_in_thread(conn.close).result()
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            conn.execute("SELECT 1")
+    finally:
+        conn.close()
 
 
 SECRET = "独特的内容-UNIQUE-SECRET-8c1f6a0e" + "x" * 40

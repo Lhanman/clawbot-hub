@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
-from clawbot_hub.events import KINDS, LEVELS, add_event
+from clawbot_hub.events import KINDS, LEVELS, add_event, recent_events
 
 
 def rows(db):
@@ -95,3 +97,13 @@ def test_the_event_belongs_to_the_callers_transaction(database):
         raise Boom
 
     assert rows(database) == []
+
+
+def test_a_row_read_back_cannot_be_changed(database):
+    with database.txn() as conn:
+        add_event(conn, 1, "login", "登录已恢复")
+
+    [row] = recent_events(database.conn())
+
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        row.detail = "改了"  # type: ignore[misc]

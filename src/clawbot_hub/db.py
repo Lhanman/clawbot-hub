@@ -294,10 +294,11 @@ def latest_version() -> int:
 
 def stored_version(path: Path, busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS) -> int | None:
     """库文件里记的版本号：文件不存在是 `None`，一张表都没有是 0。只看一眼，不改动它，也不做
-    完整性检查（`hubctl version` 用）；读不懂（不是数据库、不是本服务的库）抛 `DatabaseCorrupt`。"""
+    完整性检查（`hubctl version` 用）；读不懂（不是数据库、不是本服务的库）抛 `DatabaseCorrupt`。
+    用只读连接看：写的一方被杀后留下的 `-wal`，普通连接关闭时会顺手合并并删掉，这里不能动。"""
     if not path.exists():
         return None
-    conn = sqlite3.connect(path, timeout=busy_timeout_ms / 1000, isolation_level=None)
+    conn = connect(path, busy_timeout_ms=busy_timeout_ms, read_only=True)
     try:
         return read_version(conn)
     except sqlite3.DatabaseError as exc:

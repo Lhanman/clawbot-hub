@@ -317,7 +317,7 @@ class FakeHttp:
             server.socket = self._ssl_context.wrap_socket(server.socket, server_side=True)
         self._thread = threading.Thread(
             target=self._server.serve_forever,
-            kwargs={"poll_interval": 0.05},
+            kwargs={"poll_interval": 0.005},  # 关服务最多等这么久：每个用到假服务的测试都付一次
             name=f"{type(self).__name__}",
             daemon=True,
         )

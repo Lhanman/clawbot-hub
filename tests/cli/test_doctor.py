@@ -967,6 +967,41 @@ def test_an_ipv6_address_is_written_with_its_brackets(run, healthy, hub_paths, f
     assert detail.startswith("连不上 [::1]:9：")
 
 
+@pytest.mark.parametrize(
+    ("address", "shown"),
+    [
+        ("https://ilink.example", "ilink.example"),  # 没写端口就只写主机
+        ("https://ilink.example/", "ilink.example"),
+        ("http://ilink.example:8080/a/b?c=d", "ilink.example:8080"),
+        ("https://user:pw@ilink.example:443/x", "ilink.example:443"),
+        ("http://[::1]", "[::1]"),
+        ("http://[::1]:9/x", "[::1]:9"),
+        ("HTTP://Ilink.Example:81", "ilink.example:81"),  # 主机名由解析器统一成小写
+    ],
+)
+def test_the_address_is_shown_as_host_and_port_only_and_only_the_port_that_was_written(
+    address, shown
+):
+    assert doctor_module._where(address) == shown
+
+
+@pytest.mark.parametrize(
+    "address", ["", "ilink.example", "ftp://ilink.example", "http://", "http://[::1"]
+)
+def test_an_address_that_cannot_be_read_is_not_shown_at_all(address):
+    assert doctor_module._where(address) is None
+
+
+def test_an_address_without_a_port_goes_to_the_default_port_and_is_named_without_one(
+    run, healthy, hub_paths, fake_ilink
+):
+    bind(hub_paths, "http://127.0.0.1")  # 80 号端口没人听：连不上，但地址里不能冒出 :None
+
+    detail = rows(run("doctor", "--online"))["腾讯连通"][1]
+
+    assert detail.startswith("连不上 127.0.0.1：")
+
+
 def test_online_that_cannot_connect_is_only_a_warning(run, healthy, hub_paths, fake_ilink):
     address = fake_ilink.base_url
     fake_ilink.stop()

@@ -1,19 +1,26 @@
-"""`hubctl`：命令行入口。
+"""`hubctl`：命令行入口（任务 A8、D3）。
 
-这一版（任务 A8）有 `login`、`project add / list`、`status`，连同后面所有命令共用的约定：
+命令，顺序同 `hubctl --help`（规格 `hub-cli`「命令一览」）：`login`、`import-credentials`、
+`status`、`project`（`add / list / show / set / disable / enable / remove / rotate`）、`send`、
+`alerts`（`set-key / test`）、`doctor`、`backup`、`events`、`config show`、`version`；`serve` 到
+D6 才有。所有命令共用的约定：
 
 - 每个命令都认 `--home`（数据目录，默认环境变量 `CLAWBOT_HUB_HOME`，再默认 `~/.clawbot-hub`）和
   `--config`（配置文件，默认 `<数据目录>/config.yaml`，不存在就用内置默认值；自己指定的文件不存在
-  是错误，免得手误写错路径时悄悄用默认值）。数据目录不存在就建出来（0700），已有的不改它的权限。
+  是错误，免得手误写错路径时悄悄用默认值）。数据目录不存在就建出来（0700），已有的不改它的权限
+  （`send` 和 `doctor` 例外：前者不建，后者建了要说）。
 - 退出码：0 成功；1 失败（一句话说清楚错在哪、怎么办）；2 用法错误（参数不对，含"不是终端又没带
-  `--yes`"的拒绝）。各命令另有自己的退出码时在命令里写明。
+  `--yes`"的拒绝）。各命令另有自己的退出码时在命令里写明（`send` 的 3 到 13 见 `sendcmd.py`，
+  `doctor` 只有 ✗ 才是 1）。
 - 要确认的操作：在终端里交互问；带 `--yes` 不问；不是终端又没带 `--yes` 拒绝、退出 2、什么也不改。
-- 读数据库的命令（`status`、`project list`）在数据库还不存在时当它是空的，不去建；会写的命令
-  （`project add`）建库、升级库。输出里不出现登录凭证、对话凭证；项目密钥只在 `project add` 成功时
+- 只读的命令（`status`、`project list / show`、`events`、`doctor`）在数据库还不存在时当它是空的，
+  不去建（`doctor` 还用只读连接，什么也不改）；会写的命令（`project add` 等）建库、升级库。输出里
+  不出现登录凭证、对话凭证、告警设备码；项目密钥只在 `project add` / `project rotate` 成功时
   打印一次。
 
 测试里用 `Env` 换掉时钟、腾讯和"标准输入是不是终端"（`CliRunner.invoke(app, ..., obj=Env(...))`）。
-规格：`hub-cli`「公共约定」「看全貌」，`hub-projects`「登记项目」「查看」，`hub-login`「扫码登录」。
+规格：`hub-cli`，`hub-projects`「登记项目」「查看」，`hub-login`「扫码登录」，`hub-alerts`，
+`hub-send`「命令行发送」。
 """
 
 from __future__ import annotations

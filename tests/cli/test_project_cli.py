@@ -95,6 +95,16 @@ def test_show_as_json_has_the_listing_fields_and_the_registration_time(database,
     assert shown["created"].startswith("2026-10-12")  # 假时钟从 2026-10-12 起，带显示时区的偏移
 
 
+@pytest.mark.parametrize("args", [("project", "show", "alpha"), ("project", "list")])
+def test_json_is_indented_by_two_spaces_and_keeps_chinese_readable(database, run, args):
+    add(run, "alpha", prefix="量化")
+
+    text = run(*args, "--json").stdout
+
+    assert text.startswith('{\n  "') or text.startswith('[\n  {\n    "')
+    assert '"prefix": "量化"' in text and "\\u" not in text
+
+
 def test_show_of_a_project_nobody_registered_is_one_sentence(database, run):
     result = run("project", "show", "nobody")
 
@@ -410,6 +420,18 @@ def test_the_lifecycle_commands_name_a_project_that_does_not_exist(database, run
     result = run("project", command, "nobody", *extra)
 
     assert result.exit_code == 1 and "没有叫 nobody 的项目" in result.output
+
+
+@pytest.mark.parametrize("command", ["show", "set", "disable", "enable", "remove", "rotate"])
+def test_without_any_database_the_project_commands_say_there_is_no_such_project(run, home, command):
+    """还没有登记过任何项目（没有数据库）：照样说"没有叫……的项目"，也不为了说这一句去建库。"""
+    extra = {"set": ["--cap", "3"], "remove": ["--yes"], "rotate": ["--yes"]}.get(command, [])
+
+    result = run("project", command, "nobody", *extra)
+
+    assert result.exit_code == 1
+    assert result.stderr.strip() == "没有叫 nobody 的项目" and result.stdout == ""
+    assert list(home.iterdir()) == []
 
 
 # ---------------------------------------------------------------- remove

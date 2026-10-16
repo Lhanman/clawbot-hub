@@ -11,7 +11,15 @@ import sqlite3
 
 import pytest
 
-from clawbot_hub.db import Database, check_integrity, connect, read_version
+from clawbot_hub.db import (
+    Database,
+    DatabaseCorrupt,
+    check_integrity,
+    connect,
+    read_version,
+    stored_version,
+)
+from tests.support.threads import run_in_thread
 from tests.support.wal import leave_log_behind, wal_of
 
 
@@ -137,3 +145,164 @@ def test_a_path_with_spaces_and_non_ascii_characters_still_opens(tmp_path):
         assert conn.execute("SELECT x FROM t").fetchone()[0] == 7
     finally:
         conn.close()
+
+
+def test_the_file_is_opened_by_uri_with_mode_ro_and_never_by_a_plain_path(
+    database, paths, monkeypatch
+):
+    """有的 SQLite 编译时默认认 URI，有的不认：要看传给 `sqlite3.connect` 的参数，不能只看结果。"""
+    calls = []
+    real_connect = sqlite3.connect
+
+    def spy(*args, **kwargs):
+        calls.append((args, kwargs))
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", spy)
+
+    connect(paths.db, read_only=True).close()
+
+    [(args, kwargs)] = calls
+    assert args[0].startswith("file:///") and args[0].endswith("?mode=ro")
+    assert kwargs["uri"] is True and kwargs["isolation_level"] is None
+
+
+def test_a_read_only_connection_can_be_used_and_closed_from_another_thread(database, paths):
+    """和普通连接一样：`Database.close()` 常在别的线程里关别的线程开的连接。"""
+    conn = connect(paths.db, read_only=True)
+    try:
+        assert run_in_thread(lambda: conn.execute("SELECT 1").fetchone()[0]).result() == 1
+        run_in_thread(conn.close).result()  # 在别的线程里关也不出错
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            conn.execute("SELECT 1")  # 真的关掉了
+    finally:
+        conn.close()
+
+
+def test_a_read_only_connection_that_cannot_be_set_up_is_closed_again(paths, monkeypatch):
+    closed = []
+
+    class Broken:
+        row_factory = None
+
+        def execute(self, sql, *args):
+            raise sqlite3.OperationalError("disk I/O error")
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(sqlite3, "connect", lambda *args, **kwargs: Broken())
+
+    with pytest.raises(sqlite3.OperationalError, match="disk I/O"):
+        connect(paths.db, read_only=True)
+
+    assert closed == [True]
+
+
+def test_the_database_class_closes_read_only_connections_of_every_thread(database, paths):
+    reading = Database(paths.db, read_only=True)
+    mine = reading.conn()
+    other = run_in_thread(reading.conn).result()
+
+    reading.close()
+
+    for conn in (mine, other):
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            conn.execute("SELECT 1")
+
+
+# ------------------------------------------------------------ stored_version（`hubctl version` 用）
+
+
+def test_the_stored_version_of_a_missing_file_is_none_and_nothing_is_created(paths):
+    assert stored_version(paths.db) is None
+    assert not paths.db.exists()
+
+
+def test_the_stored_version_of_an_empty_database_file_is_zero(paths):
+    paths.db.write_bytes(b"")
+
+    assert stored_version(paths.db) == 0
+
+
+def test_the_stored_version_is_what_the_file_says(database, paths):
+    with database.txn() as conn:
+        conn.execute("UPDATE meta SET value = '7' WHERE key = 'schema_version'")
+
+    assert stored_version(paths.db) == 7
+
+
+def test_looking_at_the_stored_version_does_not_change_the_files(database, paths):
+    database.close()
+    leave_log_behind(paths.db, "INSERT INTO meta (key, value) VALUES ('probe', 'x')")
+    before = (paths.db.read_bytes(), wal_of(paths.db).read_bytes())
+
+    assert stored_version(paths.db) >= 1
+
+    assert (paths.db.read_bytes(), wal_of(paths.db).read_bytes()) == before
+
+
+def test_a_file_that_is_not_a_database_is_reported_as_such(paths):
+    paths.db.write_bytes(b"this is not a database at all" * 20)
+
+    with pytest.raises(DatabaseCorrupt, match="不是 SQLite 数据库"):
+        stored_version(paths.db)
+
+
+def test_a_database_that_is_not_ours_is_reported_as_such(paths):
+    other = sqlite3.connect(paths.db)
+    other.execute("CREATE TABLE something_else (x)")
+    other.commit()
+    other.close()
+
+    with pytest.raises(DatabaseCorrupt, match="meta 表"):
+        stored_version(paths.db)
+
+
+@pytest.mark.parametrize(
+    ("stored", "message"),
+    [(None, "没有版本号"), ("abc", "读不懂"), ("0", "读不懂"), ("-1", "读不懂"), ("1.5", "读不懂")],
+)
+def test_a_version_that_is_missing_or_makes_no_sense_is_reported(database, paths, stored, message):
+    database.close()
+    raw = sqlite3.connect(paths.db, isolation_level=None)
+    if stored is None:
+        raw.execute("DELETE FROM meta WHERE key = 'schema_version'")
+    else:
+        raw.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (stored,))
+    raw.close()
+
+    with pytest.raises(DatabaseCorrupt, match=message):
+        stored_version(paths.db)
+
+
+def test_a_database_somebody_else_is_holding_is_busy_not_corrupt(paths):
+    """别人占着锁读不了：和"不是数据库"是两回事，原样抛出原来的错（`hubctl version` 要分开说）。"""
+    holder = sqlite3.connect(paths.db, isolation_level=None)
+    holder.execute("PRAGMA journal_mode = DELETE")  # 回滚日志模式下，独占锁连读也挡
+    holder.execute("CREATE TABLE meta (key TEXT, value TEXT)")
+    holder.execute("BEGIN EXCLUSIVE")
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="locked") as info:
+            stored_version(paths.db, busy_timeout_ms=50)
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+
+    assert not isinstance(info.value, DatabaseCorrupt)
+
+
+def test_the_connection_of_the_stored_version_is_closed_again(database, paths, monkeypatch):
+    closed = []
+    real_connect = sqlite3.connect
+
+    class Spy(sqlite3.Connection):
+        def close(self):
+            closed.append(True)
+            super().close()
+
+    monkeypatch.setattr(sqlite3, "connect", lambda *a, **k: real_connect(*a, factory=Spy, **k))
+
+    stored_version(paths.db)
+
+    assert closed == [True]

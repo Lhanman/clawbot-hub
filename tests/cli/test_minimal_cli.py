@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -20,12 +21,15 @@ import pytest
 from typer.testing import CliRunner
 
 from clawbot_hub.account import AccountStore
-from clawbot_hub.cli import app
+from clawbot_hub.cli import Env, app
 from clawbot_hub.config import Config
 from clawbot_hub.db import Database, migrate
+from clawbot_hub.instance import RunInfo
 from clawbot_hub.paths import ensure_home
 from clawbot_hub.projects import Projects
 from clawbot_hub.quota import Quota
+from clawbot_hub.status import config_changed_since_start
+from clawbot_hub.upstream.http import HttpUpstream
 from tests.cli.conftest import KEY, add, db_text, json_of, mode_of, write_run_json
 from tests.login.conftest import account_file, dead_pid
 from tests.quota.conftest import REJECTED, reserve, settle, speak
@@ -137,6 +141,24 @@ def test_without_a_prepared_environment_the_real_clock_and_terminal_are_used(hom
     with sqlite3.connect(home / "hub.db") as conn:
         (created,) = conn.execute("SELECT created_ms FROM projects WHERE name = 'alpha'").fetchone()
     assert before <= created <= int(time.time() * 1000)
+
+
+def test_the_default_environment_builds_the_real_tencent_client_without_connecting():
+    """`hubctl` 装好以后没有假环境：默认"造腾讯客户端"造出来的是真的那个（造的时候不联网）。"""
+    upstream = Env().upstream_factory(Config())
+
+    assert isinstance(upstream, HttpUpstream)
+
+
+@pytest.mark.parametrize("answer", [True, False])
+def test_the_default_terminal_check_asks_standard_input(monkeypatch, answer):
+    class FakeStdin:
+        def isatty(self):
+            return answer
+
+    monkeypatch.setattr("sys.stdin", FakeStdin())
+
+    assert Env().is_terminal() is answer
 
 
 # ---------------------------------------------------------------- 公共约定：配置文件
@@ -273,6 +295,38 @@ def test_a_refusal_from_the_rules_exits_one_with_one_sentence(database, run):
     assert result.exit_code == 1
     assert "名字 seed 已经有项目在用" in result.output
     assert "Traceback" not in result.output
+
+
+def test_a_one_sentence_error_goes_to_standard_error_and_nothing_to_standard_output(run):
+    """脚本里 `hubctl … > 文件` 时，错误不能混进文件里。"""
+    result = run("project", "show", "nobody")
+
+    assert result.exit_code == 1
+    assert result.stderr.strip() == "没有叫 nobody 的项目"
+    assert result.stdout == ""
+
+
+def test_an_unexpected_error_gets_a_plain_traceback_not_the_frameworks_dressed_up_one(
+    monkeypatch, capsys, tmp_path
+):
+    """Typer 默认的"漂亮报错"会把源码（有时还有局部变量）打在屏幕上，变量里可能有密钥；关掉，
+    没料到的错误就是 Python 平常的 Traceback。"""
+
+    def boom(*_args, **_kwargs):
+        secret_in_a_local_variable = "chub_not_for_the_screen"  # noqa: F841
+        raise RuntimeError("没料到的错误")
+
+    monkeypatch.setattr("clawbot_hub.cli.load_config", boom)
+    monkeypatch.setattr("sys.excepthook", sys.excepthook)  # `app(...)` 会换掉它；测完还原
+    with pytest.raises(RuntimeError) as caught:
+        app(["status", "--home", str(tmp_path / "hub-home")])
+
+    sys.excepthook(type(caught.value), caught.value, caught.value.__traceback__)
+    shown = capsys.readouterr().err
+
+    assert "Traceback (most recent call last):" in shown
+    assert "RuntimeError: 没料到的错误" in shown
+    assert "╭" not in shown and "chub_not_for_the_screen" not in shown
 
 
 def test_not_a_terminal_and_no_yes_refuses_with_two_and_changes_nothing(database, run):
@@ -1210,6 +1264,9 @@ def test_pending_counts_what_waits_for_the_projects_and_what_went_wrong(
 # ---------------------------------------------------------------- status：提示
 
 
+EXPIRY_HINT = "对话窗口还剩不到 3 小时，快到期了：给 ClawBot 回一句话续期"
+
+
 def hint_lines(run) -> list[str]:
     lines = run("status").stdout.splitlines()
     if "提示：" not in lines:
@@ -1233,6 +1290,14 @@ def test_a_window_with_enough_time_left_has_no_hint(empty_database, run, quota, 
     speak(empty_database, quota, clock.now_ms() - 21 * HOUR)  # 刚好还剩 3 小时
 
     assert hint_lines(run) == []
+
+
+def test_a_window_one_second_short_of_the_warning_time_gets_the_hint(
+    empty_database, run, quota, clock
+):
+    speak(empty_database, quota, clock.now_ms() - 21 * HOUR - 1_000)  # 还剩 2 小时 59 分 59 秒
+
+    assert hint_lines(run) == [EXPIRY_HINT]
 
 
 def test_the_warning_hours_come_from_the_configuration(empty_database, run, quota, clock, home):
@@ -1361,9 +1426,6 @@ def test_a_run_file_without_a_start_time_cannot_say_the_configuration_is_newer(
     assert hint_lines(run) == []
 
 
-EXPIRY_HINT = "对话窗口还剩不到 3 小时，快到期了：给 ClawBot 回一句话续期"
-
-
 def test_the_sections_come_in_a_fixed_order_and_the_hints_are_indented(
     empty_database, run, hub_paths, quota, clock
 ):
@@ -1377,6 +1439,25 @@ def test_the_sections_come_in_a_fixed_order_and_the_hints_are_indented(
     heads = [line.split("：")[0] for line in lines if not line.startswith(" ")]
     assert heads == ["服务", "登录", "对话窗口", "项目", "待处理", "提示"]
     assert lines[-2:] == ["提示：", f"  {EXPIRY_HINT}"]
+
+
+def test_the_changed_since_start_answer_is_a_real_boolean_in_every_case(hub_paths, clock):
+    hub_paths.home.mkdir(mode=0o700)
+    started = clock.now_ms() - HOUR
+    running = RunInfo(pid=os.getpid(), last_heartbeat_ms=clock.now_ms(), started_ms=started)
+    no_start_time = RunInfo(pid=os.getpid(), last_heartbeat_ms=clock.now_ms())
+
+    assert config_changed_since_start(hub_paths, None) is False  # 服务没在运行
+    assert config_changed_since_start(hub_paths, no_start_time) is False  # 不知道什么时候启动的
+    assert config_changed_since_start(hub_paths, running) is False  # 没有配置文件
+
+    hub_paths.config.write_text("log:\n  level: DEBUG\n", encoding="utf-8")
+    later = (clock.now_ms() - 10 * MINUTE) / 1000
+    os.utime(hub_paths.config, (later, later))
+    assert config_changed_since_start(hub_paths, running) is True
+    earlier = (started - MINUTE) / 1000
+    os.utime(hub_paths.config, (earlier, earlier))
+    assert config_changed_since_start(hub_paths, running) is False
 
 
 # ---------------------------------------------------------------- status --json

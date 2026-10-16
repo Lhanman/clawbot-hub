@@ -14,10 +14,17 @@
 - 条数、时间、端口这类可调的数一律进配置并给默认值，不写死在代码里。
 - 真实环境是家里的 Mac mini（launchd 常驻）。安装、导入凭证、切换在 Mac 上做；开发和测试可以在云里。
 
-## 常用命令（代码写完以后才有）
+## 常用命令
 
 - `uv sync`：安装依赖（Python ≥ 3.12，锁文件 `uv.lock`）
 - `uv run pytest`：单元测试，默认跳过 `live`，也不允许联网；默认最多 4 个进程并行（整套约 70 秒，单进程要 4 分多钟），调试单条加 `-n0`
-- `uv run ruff format` / `uv run ruff check`：格式化、静态检查
-- `uv run hubctl --help`：命令行入口（登录、项目登记、状态、常驻）
-- `uv run hubctl serve`：常驻服务（`SIGTERM` / Ctrl-C 正常停）；也可以 `python -m clawbot_hub serve`
+- `uv run pytest -m live`：真机测试，访问真实的腾讯接口、占用真账号的额度，**要使用者在场授权后才能跑**（做法见 `docs/ops/真机验证清单.md`）
+- `uv run ruff format` / `uv run ruff check`：格式化、静态检查（只检查不改用 `ruff format --check`）
+- `uv run python -m clawbot_hub.apidoc`：把接口描述导出到 `docs/api/openapi.json`，加 `--check` 只核对；改了接口没重新导出，测试会红
+- `uv run python -m tests.support.fake_ilink --port <端口>`：独立运行的假腾讯（演练和联调用，`/_fake/` 下有控制接口）
+- `uv run hubctl --help`：命令行入口，每个命令都认 `--home`（数据目录）和 `--config`
+  - `serve`：常驻服务（`SIGTERM` / Ctrl-C 正常停；也可以 `python -m clawbot_hub serve`），launchd 模板在 `deploy/launchd/`
+  - `login`（扫码绑定）、`import-credentials`（接过 ashare-quant 的凭证，导入前先停服务）
+  - `project add|list|show|set|disable|enable|remove|rotate`、`send`（用项目密钥发一条，给脚本用）
+  - `status`（看全貌）、`doctor`（逐项检查，`--fix` 修权限，`--online` 联网查）、`events`、`backup`、`alerts set-key|test`、`config show`、`version`
+- 数据目录默认 `~/.clawbot-hub`，用 `CLAWBOT_HUB_HOME` 或 `--home` 改；配置文件 `<数据目录>/config.yaml`。演练一律用单独的数据目录和端口，见 `docs/ops/安装说明.md`

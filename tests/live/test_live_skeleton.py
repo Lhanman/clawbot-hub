@@ -17,8 +17,9 @@ LIVE_FILE = "tests/live/test_real_ilink.py"
 
 
 def run_pytest(*args: str) -> subprocess.CompletedProcess[str]:
+    # `-n0`：里面这一遍用单进程跑——默认的并行跑法不报“deselected”，起工作进程也白费时间
     return subprocess.run(
-        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", *args],
+        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-n0", *args],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import faulthandler
 import threading
 import time
 from collections.abc import Callable
@@ -62,5 +63,6 @@ def wait_for(predicate: Callable[[], bool], timeout: float = REAL_TIMEOUT) -> No
     deadline = time.monotonic() + timeout
     while not predicate():
         if time.monotonic() > deadline:
+            faulthandler.dump_traceback(all_threads=True)  # 超时了：各线程停在哪，报告里看得到
             raise AssertionError(f"条件在 {timeout} 秒（真实时间）内没有成立")
         time.sleep(0.002)

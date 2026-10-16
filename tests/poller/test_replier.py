@@ -650,7 +650,8 @@ def test_the_poller_keeps_receiving_while_the_send_lock_is_held(ready, clock):
 
         gate.release()
         push.result()
-        wait_for(lambda: len(ready.upstream.sent) == 2)
+        # 锁一放，队里的两条回复接着发；轮到测试看的时候可能已经发完两条了，所以是“至少”
+        wait_for(lambda: len(ready.upstream.sent) >= 2)
         assert ready.upstream.sent_texts()[1].startswith("【服务】登录状态")
     finally:
         gate.release()

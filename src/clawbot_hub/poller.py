@@ -215,6 +215,7 @@ class Poller:
         ordered = sorted(messages, key=lambda m: now if m.at_ms is None else m.at_ms)
         outgoing: list[Outgoing] = []
         woken: list[int] = []
+        received: list[tuple[int, str | None]] = []  # (字数, 交给哪个项目；服务自己回复是 None)
         ignored = no_token = 0
         with self._db.txn() as conn:
             self._write_ok(conn, now)
@@ -232,12 +233,18 @@ class Poller:
                 )
                 if new.rowcount == 0:
                     continue
-                self._accept(conn, message, key, now, outgoing, woken)
+                target = self._accept(conn, message, key, now, outgoing, woken)
+                received.append((len(message.text), target))
             if ignored:
                 conn.execute(
                     "UPDATE account_state SET ignored_count = ignored_count + ? WHERE id = 1",
                     (ignored,),
                 )
+        for chars, target in received:  # 只写字数和去向，不写内容
+            if target is None:
+                logger.info("收到一条消息，%d 个字，服务自己回复", chars)
+            else:
+                logger.info("收到一条消息，%d 个字，交给 %s", chars, target)
         if ignored:
             logger.info("丢弃了 %d 条不是使用者本人发的消息（陌生人或机器人）", ignored)
         if no_token:
@@ -252,8 +259,9 @@ class Poller:
         now: int,
         outgoing: list[Outgoing],
         woken: list[int],
-    ) -> None:
-        """使用者本人的一条新消息：开窗口、路由、入队或让服务回一句。"""
+    ) -> str | None:
+        """使用者本人的一条新消息：开窗口、路由、入队或让服务回一句。返回入队交给的项目名，
+        服务自己回复（含项目的队列满了没收下）返回 `None`。"""
         token = message.context_token or ""  # 调用之前已经排除了没有凭证的
         at_ms = now if message.at_ms is None else message.at_ms
         window_id = self._quota.open_window(conn, at_ms, token)
@@ -268,6 +276,7 @@ class Poller:
         )
         decision = route(message.text, message.has_text, snapshot, now)
         self._inbox.clear_awaiting(conn, decision.clear_awaiting)
+        target: str | None = None
 
         if isinstance(decision, ToProject):
             project = decision.project
@@ -288,6 +297,7 @@ class Poller:
                     conn, f"full:{project.name}", now, hubtext.full_text(project.display)
                 )
             else:
+                target = project.name
                 woken.append(project.id)
                 text = None
                 if project.name not in online:
@@ -301,6 +311,7 @@ class Poller:
             text = self._hub_text(conn, decision, now, projects, online)
         if text is not None:
             outgoing.append(Outgoing(token, text))
+        return target
 
     def _hub_text(
         self,

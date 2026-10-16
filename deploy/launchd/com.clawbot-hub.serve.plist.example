@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  ClawBot 共用服务（hubctl serve）的 launchd 模板。安装步骤见 docs/ops/安装说明.md 第 8 步。
+
+  四个占位符，安装时用 sed 换成实际的值（演练和正式用不同的 label 和数据目录）：
+    __LABEL__     任务名，正式的是 com.clawbot-hub.serve，演练的是 com.clawbot-hub.rehearsal
+    __REPO_DIR__  代码仓库的完整路径（uv run 要在这个目录里找项目）
+    __UV_PATH__   uv 的完整路径（用 `command -v uv` 查）
+    __DATA_DIR__  数据目录的完整路径（正式的是 ~/.clawbot-hub 展开后的样子）
+
+  行为：
+  - 登录后自动启动（RunAtLoad）。
+  - 只有崩溃或退出码不是 0 才会被拉起来（KeepAlive 的 SuccessfulExit 为 false）：正常停（launchctl
+    bootout、SIGTERM，退出码 0）不会被立刻拉回来。退出码 1（配置错、端口被占）、2（已经有一个在运行）、
+    3（数据库版本比程序新）会被拉起；ThrottleInterval 30 秒，免得反复空转刷日志。
+  - 停的时候 launchd 先发 SIGTERM，等 ExitTimeOut 秒再 SIGKILL。服务收到 SIGTERM 会把正在发的那一条发完
+    （最多 server.shutdown_seconds，默认 35 秒），所以 ExitTimeOut 要比它大；改了 shutdown_seconds 就
+    一起改这里。uv run 会把停止信号转给它启动的服务；装好后用 launchctl bootout 停一次，hubctl status
+    里没有「服务重启」的告警就说明信号转到了。
+  - Umask 63（八进制 077）：服务建的文件只有本人能读。launchd.log 是 launchd 在服务启动前建的，Umask
+    对它管不管用要在真机上看（真机验证清单里有这一项）；服务启动时会把放宽了的权限改回 0600。
+  - 日志：服务自己写 <数据目录>/logs/hub.log（带轮转）；标准输出和标准错误同样的内容也进
+    launchd.log。launchd.log 不轮转，不想要它就把下面两处路径改成 /dev/null。
+  - 不放任何密钥：登录凭证在数据目录的 account.json，Bark 设备码用 hubctl alerts set-key 存进数据目录。
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>__LABEL__</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__UV_PATH__</string>
+        <string>run</string>
+        <string>hubctl</string>
+        <string>serve</string>
+        <string>--home</string>
+        <string>__DATA_DIR__</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__REPO_DIR__</string>
+
+    <!-- launchd 不继承终端里的环境变量 -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>LANG</key>
+        <string>zh_CN.UTF-8</string>
+        <key>PYTHONIOENCODING</key>
+        <string>utf-8</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+    <key>ExitTimeOut</key>
+    <integer>45</integer>
+    <key>Umask</key>
+    <integer>63</integer>
+
+    <key>StandardOutPath</key>
+    <string>__DATA_DIR__/logs/launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>__DATA_DIR__/logs/launchd.log</string>
+</dict>
+</plist>

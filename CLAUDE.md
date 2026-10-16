@@ -17,6 +17,7 @@
 ## 常用命令（代码写完以后才有）
 
 - `uv sync`：安装依赖（Python ≥ 3.12，锁文件 `uv.lock`）
-- `uv run pytest`：单元测试，默认跳过 `live`，也不允许联网；默认最多 4 个进程并行（整套约 1 分钟，单进程要 3 分钟），调试单条加 `-n0`
+- `uv run pytest`：单元测试，默认跳过 `live`，也不允许联网；默认最多 4 个进程并行（整套约 70 秒，单进程要 4 分多钟），调试单条加 `-n0`
 - `uv run ruff format` / `uv run ruff check`：格式化、静态检查
 - `uv run hubctl --help`：命令行入口（登录、项目登记、状态、常驻）
+- `uv run hubctl serve`：常驻服务（`SIGTERM` / Ctrl-C 正常停）；也可以 `python -m clawbot_hub serve`

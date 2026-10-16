@@ -44,6 +44,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 import traceback
 from typing import Annotated, Any
 
@@ -159,8 +160,23 @@ def client_host(scope: Scope) -> str | None:
     return client[0] if client else None
 
 
+# 认证通过的请求，把项目名记在 ASGI 的 scope 里，守门人写请求日志时取用
+PROJECT_SCOPE_KEY = "clawbot_hub.project"
+# 请求日志里路径最多写这么多个字符（固定值）：再长的多半是乱试的，没必要整条记下
+LOGGED_PATH_CHARS = 200
+
+
+def _logged_path(path: str) -> str:
+    """路径里的控制字符（解码以后的换行之类）换成问号，免得一个请求在日志里变成两行。"""
+    shown = "".join(char if char.isprintable() else "?" for char in path[: LOGGED_PATH_CHARS + 1])
+    return shown if len(path) <= LOGGED_PATH_CHARS else shown[:LOGGED_PATH_CHARS] + "…"
+
+
 class Guard:
-    """最外层的 ASGI 中间件，见模块说明的第 1 关。"""
+    """最外层的 ASGI 中间件，见模块说明的第 1 关。
+
+    请求日志也在这里写：`方法 路径 状态码 项目名 耗时ms`（没认出项目写 `-`；响应没发出去就断了
+    状态码写 0）。路径不含查询串；请求头、请求体、局域网规则拒绝的来源（403）都不记。"""
 
     def __init__(self, app: ASGIApp, services: Services) -> None:
         self.app = app
@@ -173,26 +189,43 @@ class Guard:
         if self._services.config.server.lan and not is_private_source(client_host(scope)):
             await self._empty(send, 403)
             return
-        if self._services.shutting_down.is_set():
-            response = error_response(503, "shutting_down", SHUTTING_DOWN_TEXT)
-            await response(scope, receive, send)
-            return
+        started_at = time.perf_counter()
+        status = 0
         started = False
 
         async def watched(message: Message) -> None:
-            nonlocal started
+            nonlocal status, started
             if message["type"] == "http.response.start":
                 started = True
+                status = message["status"]
             await send(message)
 
+        # 先记进来、再看有没有在关闭：关闭的一方先立标志、再等个数归零，这样进来的请求要么看到
+        # 标志（马上 503），要么已经被数着（关闭会等它处理完）
+        self._services.in_flight.enter()
         try:
-            await self.app(scope, receive, watched)
-        except Exception as exc:  # noqa: BLE001 - 兜底：任何没想到的错都变成 500
-            _log_internal(exc)
-            if started:
-                return  # 响应已经开始，改不了了；连接会在响应没写完时被关掉
-            response = error_response(500, "internal", INTERNAL_TEXT)
-            await response(scope, receive, send)
+            if self._services.shutting_down.is_set():
+                response = error_response(503, "shutting_down", SHUTTING_DOWN_TEXT)
+                await response(scope, receive, watched)
+                return
+            try:
+                await self.app(scope, receive, watched)
+            except Exception as exc:  # noqa: BLE001 - 兜底：任何没想到的错都变成 500
+                _log_internal(exc)
+                if started:
+                    return  # 响应已经开始，改不了了；连接会在响应没写完时被关掉
+                response = error_response(500, "internal", INTERNAL_TEXT)
+                await response(scope, receive, watched)
+        finally:
+            self._services.in_flight.leave()
+            logger.info(
+                "%s %s %d %s %dms",
+                scope["method"],
+                _logged_path(scope["path"]),
+                status,
+                scope.get(PROJECT_SCOPE_KEY) or "-",
+                round((time.perf_counter() - started_at) * 1000),
+            )
 
     @staticmethod
     async def _empty(send: Send, status: int) -> None:
@@ -235,13 +268,15 @@ def authenticated(request: Request) -> Project:
                 429, "too_many_failures", TOO_MANY_FAILURES_TEXT, {"Retry-After": str(wait)}
             )
     try:
-        return services.projects.authenticate(_bearer(request))
+        project = services.projects.authenticate(_bearer(request))
     except Unauthorized:
         if counted:
             services.limits.failures.add(source)
         raise ApiError(401, "unauthorized", UNAUTHORIZED_TEXT) from None
     except ProjectDisabled:
         raise ApiError(403, "project_disabled", DISABLED_TEXT) from None
+    request.scope[PROJECT_SCOPE_KEY] = project.name
+    return project
 
 
 Authed = Annotated[Project, Depends(authenticated)]

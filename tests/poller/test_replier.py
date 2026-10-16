@@ -15,6 +15,7 @@ import pytest
 from clawbot_hub.config import Config
 from clawbot_hub.quota import PUSH
 from clawbot_hub.replier import JOIN_SECONDS, REPLY_QUEUE_MAX, Outgoing, Replier
+from clawbot_hub.services import InFlight
 from clawbot_hub.upstream.base import Rejected
 from tests.poller.conftest import Rig
 from tests.support.fake_upstream import Gate
@@ -465,14 +466,65 @@ def test_an_empty_queue_has_nothing_to_send(window):
     assert replier.pending == 0
 
 
-def test_the_queue_holds_twenty_and_drops_the_oldest(window):
+def test_the_queue_holds_twenty_and_drops_the_oldest(window, caplog):
     assert REPLY_QUEUE_MAX == 20
     replier = make_replier(window)
-    dropped = [replier.submit(outgoing(n)) for n in range(23)]
+    with caplog.at_level(logging.WARNING, logger="clawbot_hub.replier"):
+        dropped = [replier.submit(outgoing(n)) for n in range(23)]
     assert dropped == [0] * 20 + [1] * 3
     assert replier.pending == 20
     replier.process_one()
     assert window.upstream.sent_texts() == ["【服务】第 3 条"]  # 最旧的三条被挤掉了
+    # 挤掉一次记一次警告；没挤掉就不记；日志里没有话的内容
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings == ["服务回复的队列满了，丢掉最旧的 1 条"] * 3
+    assert "第 " not in caplog.text
+
+
+def test_nothing_is_logged_while_the_queue_has_room(window, caplog):
+    replier = make_replier(window)
+
+    with caplog.at_level(logging.DEBUG, logger="clawbot_hub.replier"):
+        for n in range(REPLY_QUEUE_MAX):
+            replier.submit(outgoing(n))
+
+    assert caplog.records == []
+
+
+def test_the_reply_being_sent_is_counted_as_in_flight_until_it_is_done(window):
+    in_flight = InFlight()
+    replier = Replier(window.hub.sender, window.config.hub.label, in_flight=in_flight)
+    gate = window.upstream.hold("send_text")
+    replier.submit(outgoing(1))
+
+    sending = run_in_thread(replier.process_one)
+    assert gate.entered.wait(5)
+
+    assert in_flight.count == 1
+    assert replier.pending == 0  # 已经出了队，但还在数着
+    gate.release()
+    assert sending.result() is True
+    assert in_flight.count == 0
+
+
+def test_a_reply_that_fails_is_not_left_counted_as_in_flight(window):
+    in_flight = InFlight()
+    replier = Replier(window.hub.sender, window.config.hub.label, in_flight=in_flight)
+    window.upstream.script("send_text", RuntimeError("boom"))
+    replier.submit(outgoing(1))
+
+    assert replier.process_one() is True
+
+    assert in_flight.count == 0
+
+
+def test_an_empty_queue_counts_nothing_as_in_flight(window):
+    in_flight = InFlight()
+    replier = Replier(window.hub.sender, window.config.hub.label, in_flight=in_flight)
+
+    assert replier.process_one() is False
+
+    assert in_flight.count == 0
 
 
 def test_a_reply_is_tried_once_and_never_again(window):

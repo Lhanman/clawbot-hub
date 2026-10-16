@@ -24,6 +24,7 @@ from collections import deque
 from dataclasses import dataclass, field
 
 from clawbot_hub.sender import Origin, Sender
+from clawbot_hub.services import InFlight
 
 logger = logging.getLogger(__name__)
 
@@ -46,9 +47,11 @@ class Outgoing:
 
 
 class Replier:
-    def __init__(self, sender: Sender, label: str) -> None:
+    def __init__(self, sender: Sender, label: str, *, in_flight: InFlight | None = None) -> None:
+        """`in_flight`：正在发的这一条记进去，服务关闭时才会等它发完（见 `services.InFlight`）。"""
         self._sender = sender
         self._author = Origin(HUB_NAME, label)
+        self._in_flight = in_flight
         self._cond = threading.Condition()
         self._queue: deque[Outgoing] = deque()
         self._thread: threading.Thread | None = None
@@ -80,10 +83,15 @@ class Replier:
             if not self._queue:
                 return False
             outgoing = self._queue.popleft()
+            if self._in_flight is not None:
+                self._in_flight.enter()  # 和出队在同一把锁里：关闭时看到队空了，这条一定已经被数着
         try:
             self._sender.reply(self._author, outgoing.text, context_token=outgoing.context_token)
         except Exception as exc:  # noqa: BLE001 - 回复尽力而为，出错不能连累发送线程
             logger.error("服务回复发送出错：%s", type(exc).__name__)
+        finally:
+            if self._in_flight is not None:
+                self._in_flight.leave()
         return True
 
     # ------------------------------------------------ 线程

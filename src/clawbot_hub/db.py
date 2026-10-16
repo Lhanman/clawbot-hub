@@ -56,8 +56,9 @@ class DatabaseTooNew(DatabaseProblem):
         self.found = found
         self.known = known
         super().__init__(
-            f"数据库版本比程序新：数据库是第 {found} 版，这个程序只认识到第 {known} 版。"
-            "请换回匹配的程序版本，不要让旧程序改动这个数据库。"
+            "数据库版本比程序新，请升级程序，不要回退"
+            f"（数据库是第 {found} 版，这个程序只认识到第 {known} 版）。"
+            "不要让旧程序改动这个数据库。"
         )
 
 

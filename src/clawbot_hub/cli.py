@@ -1,9 +1,9 @@
 """`hubctl`：命令行入口（任务 A8、D3）。
 
-命令，顺序同 `hubctl --help`（规格 `hub-cli`「命令一览」）：`login`、`import-credentials`、
+命令，顺序同 `hubctl --help`（规格 `hub-cli`「命令一览」）：`serve`、`login`、`import-credentials`、
 `status`、`project`（`add / list / show / set / disable / enable / remove / rotate`）、`send`、
-`alerts`（`set-key / test`）、`doctor`、`backup`、`events`、`config show`、`version`；`serve` 到
-D6 才有。所有命令共用的约定：
+`alerts`（`set-key / test`）、`doctor`、`backup`、`events`、`config show`、`version`。所有命令
+共用的约定：
 
 - 每个命令都认 `--home`（数据目录，默认环境变量 `CLAWBOT_HUB_HOME`，再默认 `~/.clawbot-hub`）和
   `--config`（配置文件，默认 `<数据目录>/config.yaml`，不存在就用内置默认值；自己指定的文件不存在
@@ -18,24 +18,34 @@ D6 才有。所有命令共用的约定：
   不出现登录凭证、对话凭证、告警设备码；项目密钥只在 `project add` / `project rotate` 成功时
   打印一次。
 
-测试里用 `Env` 换掉时钟、腾讯和"标准输入是不是终端"（`CliRunner.invoke(app, ..., obj=Env(...))`）。
+`serve`（任务 D6）是常驻服务，和上面的约定不一样的地方：配置错的时候连数据目录都不建，所以
+不走 `_session`（那里先建数据目录）；顺序是读配置（错误一次列全）→ `umask 077` → 装 `SIGTERM` /
+`SIGINT` 的处理 → `app.Service.start`（启动 8 步，见规格 `hub-deploy`）→ 等停止请求 → 正常关闭。
+退出码：0 正常退出；1 配置错、端口被占、关闭时间用完被强退；2 已经有一个在运行；3 数据库比程序
+新或文件坏了。强退时不做收尾，直接结束进程（还有线程卡在腾讯那边，等不起）。
+
+测试里用 `Env` 换掉时钟、腾讯和"标准输入是不是终端"（`CliRunner.invoke(app, ..., obj=Env(...))`）；
+`serve` 另有停止请求、强退、umask 和启动步骤的口子，见 `Env`。
 规格：`hub-cli`，`hub-projects`「登记项目」「查看」，`hub-login`「扫码登录」，`hub-alerts`，
-`hub-send`「命令行发送」。
+`hub-send`「命令行发送」，`hub-deploy`「启动自检和顺序」「正常关闭」。
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
+import signal
 import sqlite3
 import sys
+import threading
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import tzinfo
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated, NoReturn
+from typing import Annotated, Any, NoReturn, Protocol
 
 import typer
 from typer.core import TyperGroup
@@ -113,14 +123,83 @@ def _stdin_is_terminal() -> bool:
     return sys.stdin.isatty()
 
 
+class StopSignal(Protocol):
+    """`serve` 要的"停止请求"：先装上，等它来，最后还回去。真的是 `StopRequests`。"""
+
+    def install(self) -> None: ...
+
+    def wait(self) -> None: ...
+
+    def restore(self) -> None: ...
+
+
+class StopRequests:
+    """停止请求：`SIGTERM`（`launchctl bootout`、`kill`）和 `SIGINT`（终端里的 Ctrl-C）。
+
+    信号处理函数里只改一个标记，不拿锁、不叫醒别人：处理函数是在主线程两条指令之间插进来的，要是
+    这时主线程正拿着同一把锁（比如 `Event.wait` 里），处理函数再去拿它就死锁了。所以等的一方每
+    `POLL_SECONDS` 秒自己看一眼标记；别的线程（测试）请求停止可以用 `request()`，那个会马上叫醒。
+    """
+
+    POLL_SECONDS = 0.2
+    SIGNALS = (signal.SIGTERM, signal.SIGINT)
+
+    def __init__(self) -> None:
+        self._requested = False
+        self._wake = threading.Event()
+        self._saved: dict[int, Any] = {}
+
+    def install(self) -> None:
+        """装上处理函数（只能在主线程里），记下原来的。"""
+        for number in self.SIGNALS:
+            self._saved[number] = signal.signal(number, self._on_signal)
+
+    def _on_signal(self, number: int, frame: Any) -> None:
+        self._requested = True
+
+    def request(self) -> None:
+        self._requested = True
+        self._wake.set()
+
+    def wait(self) -> None:
+        """等到有人请求停止。已经请求过的马上返回。"""
+        while not self._requested:
+            self._wake.wait(self.POLL_SECONDS)
+
+    def restore(self) -> None:
+        """把原来的处理函数放回去。"""
+        for number, old in self._saved.items():
+            signal.signal(number, signal.SIG_DFL if old is None else old)
+        self._saved.clear()
+
+
+def _hard_exit(code: int) -> NoReturn:
+    """强行退出：不跑任何清理，马上结束进程。关闭时间用完了、还有线程卡在腾讯那边时用。
+    退出之前把日志和标准输出、标准错误刷出去（原因已经写在里面了）。"""
+    with suppress(Exception):
+        logging.shutdown()
+    for stream in (sys.stdout, sys.stderr):
+        with suppress(Exception):
+            stream.flush()
+    os._exit(code)
+
+
+def _no_step(name: str) -> None:
+    return None
+
+
 @dataclass
 class Env:
-    """命令行碰到外面世界的几个口子；测试里换成假的。"""
+    """命令行碰到外面世界的几个口子；测试里换成假的。后四个只有 `serve` 用。"""
 
     clock: Clock = field(default_factory=RealClock)
     upstream_factory: Callable[[Config], Upstream] = _http_upstream
     is_terminal: Callable[[], bool] = _stdin_is_terminal
     environ: Mapping[str, str] | None = None  # `None` 就是真的环境变量
+    stop_requests: Callable[[], StopSignal] = StopRequests
+    hard_exit: Callable[[int], NoReturn] = _hard_exit
+    umask: Callable[[int], object] = os.umask
+    on_startup_step: Callable[[str], None] | None = None  # 每一步开始时调，看启动的先后
 
 
 @dataclass(frozen=True)
@@ -229,7 +308,7 @@ def _confirmed[T](session: Session, action: Callable[[bool], T], yes: bool) -> T
 # ---------------------------------------------------------------- 命令
 
 
-# `hubctl --help` 里命令的先后：同规格「命令一览」那张表（`serve` 在 D6 加）
+# `hubctl --help` 里命令的先后：同规格「命令一览」那张表
 COMMAND_ORDER = (
     "serve",
     "login",
@@ -282,6 +361,46 @@ app.add_typer(config_app, name="config")
 def _root(ctx: typer.Context) -> None:
     if not isinstance(ctx.obj, Env):
         ctx.obj = Env()
+
+
+@app.command("serve", help="启动常驻服务（Ctrl-C 或 SIGTERM 停止）")
+def serve(ctx: typer.Context, home: HomeOption = None, config: ConfigOption = None) -> None:
+    # 只有这条命令用得着 HTTP 服务那一大套，别的命令不为它多等导入
+    from clawbot_hub.app import Service, StartupError
+
+    env: Env = ctx.obj
+    step = env.on_startup_step or _no_step
+
+    step("config")  # 第 1 步：读配置并校验。数据目录这时还不碰：配置错了，什么都不建
+    paths = HubPaths(resolve_home(home, env.environ))
+    if config is not None and not config.is_file():
+        _fail(f"配置文件不存在或不是文件：{config}")
+    try:
+        loaded = load_config(config or paths.config)
+    except ConfigError as exc:
+        _fail(str(exc))
+
+    env.umask(0o077)  # 此后建的文件和目录默认只有本人能读写
+    stop = env.stop_requests()
+    stop.install()
+    try:
+        try:
+            service = Service.start(
+                loaded,
+                paths=paths,
+                upstream=env.upstream_factory(loaded),
+                clock=env.clock,
+                environ=env.environ,
+                on_step=step,
+            )
+        except StartupError as exc:
+            _fail(str(exc), exc.exit_code)
+        stop.wait()
+        code = service.stop()
+    finally:
+        stop.restore()
+    if code != 0:
+        env.hard_exit(code)  # 关闭时间用完：不收拾，马上结束进程（还有线程卡着）
 
 
 @app.command("login", help="扫码绑定微信 ClawBot")

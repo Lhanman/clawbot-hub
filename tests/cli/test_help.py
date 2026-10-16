@@ -5,7 +5,7 @@
 `docs/clients/接入指南.md`）里写到的每一条 `hubctl …` 对一遍：命令和选项都得真有，免得文档里的
 命令照抄下来跑不通。
 
-`serve` 到 D6 才有（`NOT_YET`）：它做出来以后，把它从 `NOT_YET` 里拿掉，列表和先后的测试就会要求它。
+`serve`（D6）和别的命令一样受这些检查：说明、`--home`、`--config`、文档里的写法。
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ from typer.testing import CliRunner
 
 from clawbot_hub.cli import COMMAND_ORDER, app
 
-NOT_YET = {"serve"}  # 还没做的命令（D6）：做完删掉这一行里的名字
 SPEC_ORDER = [
     "serve",
     "login",
@@ -76,7 +75,7 @@ def test_help_lists_every_command_in_the_order_of_the_spec():
     result = CliRunner().invoke(app, ["--help"])
 
     assert result.exit_code == 0
-    assert table_names(result.output) == [name for name in SPEC_ORDER if name not in NOT_YET]
+    assert table_names(result.output) == SPEC_ORDER
 
 
 def test_the_order_written_in_the_code_is_the_one_in_the_spec():
@@ -84,7 +83,7 @@ def test_the_order_written_in_the_code_is_the_one_in_the_spec():
 
 
 def test_the_command_set_is_exactly_the_spec_one():
-    assert sorted(root().commands) == sorted(set(SPEC_ORDER) - NOT_YET)
+    assert sorted(root().commands) == sorted(SPEC_ORDER)
     for group, names in SUBCOMMANDS.items():
         assert list(root().commands[group].commands) == names  # 先后也同规格
 
@@ -185,8 +184,6 @@ def check_invocation(words: list[str]) -> str | None:
     first = words[0]
     if first.startswith("-"):  # `hubctl --help`
         return None if first in ("--help",) else f"根命令没有选项 {first}"
-    if first in NOT_YET:
-        return None
     command = top.commands.get(first)
     if command is None:
         return f"没有命令 {first}"
@@ -231,7 +228,7 @@ def test_the_install_guide_lists_exactly_the_commands_there_are():
 
     assert sentence, "安装说明里找不到“hubctl --help 列出全部命令”那句"
     listed = re.findall(r"`([a-z-]+)`", sentence[1])
-    assert listed == [name for name in SPEC_ORDER if name in set(root().commands) | NOT_YET]
+    assert listed == SPEC_ORDER
 
 
 def test_the_checker_itself_notices_a_wrong_command_or_option():

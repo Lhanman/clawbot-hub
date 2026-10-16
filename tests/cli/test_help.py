@@ -1,8 +1,9 @@
 """`hubctl --help` 和各命令的帮助（任务 D3）。
 
 规格 `hub-cli`「命令一览」：`hubctl --help` 列出全部命令，每条一句中文说明；所有命令认 `--home`
-和 `--config`。另外把运维文档（`docs/ops/*.md`）里写到的每一条 `hubctl …` 对一遍：命令和选项
-都得真有，免得文档里的命令照抄下来跑不通。
+和 `--config`。另外把运维文档（`docs/ops/*.md`）和项目那一侧的文档（`docs/api/v1.md`、
+`docs/clients/接入指南.md`）里写到的每一条 `hubctl …` 对一遍：命令和选项都得真有，免得文档里的
+命令照抄下来跑不通。
 
 `serve` 到 D6 才有（`NOT_YET`）：它做出来以后，把它从 `NOT_YET` 里拿掉，列表和先后的测试就会要求它。
 """
@@ -39,7 +40,11 @@ SUBCOMMANDS = {
     "config": ["show"],
 }
 CJK = re.compile(r"[一-鿿]")
-OPS_DOCS = sorted((Path(__file__).resolve().parents[2] / "docs" / "ops").glob("*.md"))
+ROOT = Path(__file__).resolve().parents[2]
+OPS_DOCS = sorted((ROOT / "docs" / "ops").glob("*.md"))
+# 项目那一侧的文档（D5）里也写着 `hubctl …` 的命令，一样要对得上
+CLIENT_DOCS = [ROOT / "docs" / "api" / "v1.md", ROOT / "docs" / "clients" / "接入指南.md"]
+COMMAND_DOCS = [*OPS_DOCS, *CLIENT_DOCS]
 
 
 def root():
@@ -88,6 +93,14 @@ def test_with_no_command_the_help_is_shown():
     result = CliRunner().invoke(app, [])
 
     assert "Usage: hubctl" in result.output and "login" in table_names(result.output)
+
+
+def test_no_shell_completion_options_are_offered():
+    """补全安装会往使用者的 shell 配置里写东西，规格没要，不提供。"""
+    for argv in (["--help"], ["project", "--help"]):
+        assert "completion" not in CliRunner().invoke(app, argv).output, argv
+
+    assert CliRunner().invoke(app, ["--install-completion"]).exit_code == 2
 
 
 def test_a_command_group_without_a_subcommand_shows_what_it_has():
@@ -151,7 +164,7 @@ HUBCTL = re.compile(r"hubctl((?:[ \t]+[^\s`|]+)+)")
 def doc_invocations() -> list[tuple[str, int, list[str]]]:
     """(文件名, 行号, 词表)：文档里每一处 `hubctl` 后面跟着的词，到反引号、竖线或行尾为止。"""
     found = []
-    for doc in OPS_DOCS:
+    for doc in COMMAND_DOCS:
         for number, line in enumerate(doc.read_text(encoding="utf-8").splitlines(), start=1):
             for match in HUBCTL.finditer(line):
                 words = match[1].split()
@@ -196,13 +209,15 @@ def check_invocation(words: list[str]) -> str | None:
 
 def test_the_ops_docs_were_found():
     assert len(OPS_DOCS) >= 4
+    assert all(doc.is_file() for doc in CLIENT_DOCS)
     assert len(doc_invocations()) >= 30  # 少了多半是解析坏了
+    assert {name for name, _, _ in doc_invocations()} >= {doc.name for doc in CLIENT_DOCS}
 
 
 @pytest.mark.parametrize(
     "doc, number, words", doc_invocations(), ids=lambda v: v if isinstance(v, str) else None
 )
-def test_every_command_in_the_ops_docs_exists(doc, number, words):
+def test_every_command_in_the_docs_exists(doc, number, words):
     problem = check_invocation(words)
 
     assert problem is None, f"{doc} 第 {number} 行 `hubctl {' '.join(words)}`：{problem}"

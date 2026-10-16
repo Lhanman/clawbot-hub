@@ -49,12 +49,14 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.openapi.utils import get_openapi
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import ClientDisconnect
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 import clawbot_hub
+from clawbot_hub import apischema
 from clawbot_hub.inbox import HandleExpired, Leased, ReplyLimit, UnknownHandle
 from clawbot_hub.lan import is_loopback, is_private_source, source_key
 from clawbot_hub.projects import Project, ProjectDisabled, Unauthorized
@@ -385,7 +387,13 @@ def _send_result(result: SendResult, tz) -> dict[str, Any]:
     }
 
 
-@router.post("/v1/messages", openapi_extra={"requestBody": MESSAGES_BODY})
+@router.post(
+    "/v1/messages",
+    summary="发一条消息",
+    operation_id="send_message",
+    openapi_extra={"requestBody": MESSAGES_BODY, **apischema.SECURED},
+    responses=apischema.MESSAGES_RESPONSES,
+)
 def post_message(request: Request, project: Limited, body: Body) -> JSONResponse:
     """发一条消息，拿到最终结果才返回（同步）。"""
     services = _services(request)
@@ -435,7 +443,13 @@ def _inbox_item(item: Leased, tz) -> dict[str, Any]:
     }
 
 
-@router.get("/v1/inbox", openapi_extra={"parameters": INBOX_PARAMETERS})
+@router.get(
+    "/v1/inbox",
+    summary="取话",
+    operation_id="fetch_inbox",
+    openapi_extra={"parameters": INBOX_PARAMETERS, **apischema.SECURED},
+    responses=apischema.INBOX_RESPONSES,
+)
 def get_inbox(request: Request, project: Authed) -> JSONResponse:
     """取话：分给调用方这个项目的话，没有就等（最多 `inbox.max_wait` 秒）。同步函数，框架把它
     放进线程池，所以等的时候不占事件循环。"""
@@ -455,7 +469,13 @@ def get_inbox(request: Request, project: Authed) -> JSONResponse:
     )
 
 
-@router.post("/v1/inbox/ack", openapi_extra={"requestBody": ACK_BODY})
+@router.post(
+    "/v1/inbox/ack",
+    summary="确认处理完了",
+    operation_id="ack_inbox",
+    openapi_extra={"requestBody": ACK_BODY, **apischema.SECURED},
+    responses=apischema.ACK_RESPONSES,
+)
 def post_ack(request: Request, project: Authed, body: Body) -> JSONResponse:
     """确认处理完了：不再给，立即清掉正文。重复、别人的、不存在的都不报错，列在 `unknown`。"""
     fields = json_object(body)
@@ -470,7 +490,13 @@ def post_ack(request: Request, project: Authed, body: Body) -> JSONResponse:
     return JSONResponse({"acked": result.acked, "unknown": result.unknown})
 
 
-@router.post("/v1/replies", openapi_extra={"requestBody": REPLIES_BODY})
+@router.post(
+    "/v1/replies",
+    summary="回复使用者的一句话",
+    operation_id="reply",
+    openapi_extra={"requestBody": REPLIES_BODY, **apischema.SECURED},
+    responses=apischema.REPLIES_RESPONSES,
+)
 def post_reply(request: Request, project: Limited, body: Body) -> JSONResponse:
     """回复使用者的一句话，拿到最终结果才返回（同步）。用取话时给的回复句柄找到那句话的对话凭证。"""
     services = _services(request)
@@ -567,13 +593,24 @@ def project_status(services: Services, project: Project) -> dict[str, Any]:
     }
 
 
-@router.get("/v1/status")
+@router.get(
+    "/v1/status",
+    summary="额度和状态",
+    operation_id="get_status",
+    openapi_extra=apischema.SECURED,
+    responses=apischema.STATUS_RESPONSES,
+)
 def get_status(request: Request, project: Authed) -> JSONResponse:
     """调用方自己的额度和全局的登录、窗口状态。"""
     return JSONResponse(project_status(_services(request), project))
 
 
-@router.get("/v1/health")
+@router.get(
+    "/v1/health",
+    summary="探活",
+    operation_id="get_health",
+    responses=apischema.HEALTH_RESPONSES,
+)
 def get_health() -> dict[str, Any]:
     """探活：不要密钥，只说服务活着和版本，不含登录、窗口、项目的任何信息。"""
     return {"ok": True, "version": clawbot_hub.__version__, "api": clawbot_hub.API_VERSION}
@@ -582,17 +619,35 @@ def get_health() -> dict[str, Any]:
 # ---------------------------------------------------------------- 装应用
 
 
+def _openapi(app: FastAPI) -> dict[str, Any]:
+    """导出接口描述：框架生成的，加上"密钥怎么带"（框架不知道我们自己读 `Authorization`）。"""
+    if app.openapi_schema is None:
+        schema = get_openapi(
+            title=app.title,
+            version=app.version,
+            description=app.description,
+            routes=app.routes,
+        )
+        components = schema.setdefault("components", {})
+        components["securitySchemes"] = apischema.SECURITY_SCHEMES
+        components["schemas"] = apischema.SCHEMAS
+        app.openapi_schema = schema
+    return app.openapi_schema
+
+
 def build_app(services: Services) -> FastAPI:
     """把接口装成一个应用。`/docs`、`/redoc`、`/openapi.json` 不开（导出接口描述用
     `app.openapi()`）；路径末尾多一个斜杠不重定向。"""
     app = FastAPI(
         title="clawbot-hub",
         version=clawbot_hub.__version__,
+        description=apischema.DESCRIPTION,
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
         redirect_slashes=False,
     )
+    app.openapi = lambda: _openapi(app)  # type: ignore[method-assign]
     app.state.services = services
     app.include_router(router)
     app.add_exception_handler(ApiError, _api_error)

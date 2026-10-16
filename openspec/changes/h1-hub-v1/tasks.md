@@ -160,6 +160,7 @@
 - [ ] E3 `[Mac]` 使用者授权后：照 `docs/ops/安装说明.md` 装环境（`uv sync`）、`hubctl doctor`、装 launchd（装好后 `ls -l` 看 `launchd.log` 的权限），**先不连真实的 ClawBot**；演练用**单独的数据目录和端口**（`CLAWBOT_HUB_HOME=~/.clawbot-hub-rehearsal`、另一个 launchd label），用 `tests/support/fake_ilink.py` 的独立运行模式演练一遍：登记 ashare-quant、发一条、收一条（`/_fake/inbox` 放进去）、断一次网（`/_fake/mode`）、重启、`launchctl bootout` 停服务；演练完把整个演练目录移走，正式数据目录里不留演练遗留
 - [ ] E4 `[Mac]` 使用者授权后：按 `docs/ops/真机验证清单.md` 在真账号上测（先问清楚会占用额度、会不会影响现有微信问答），把实测值填进 `tests/live/test_real_ilink.py`，结果写回文档，必要时把配置默认值（`upstream.confirm`、`upstream.profile`、窗口长度和条数）改成实测值
 - [ ] E5 `[云]` 用 `openspec archive` 把本变更归档进 `openspec/specs/`
+- 阶段 E 验收（云里的部分，2026-10-16）：`uv run ruff format --check` 和 `uv run ruff check` 干净；`uv run pytest -q` 5570 条通过、2 条跳过（都是这台云上的机器没有 IPv6 回环地址，Mac 上会跑），并行用时约 76 秒；`uv run python -m clawbot_hub.apidoc --check` 通过；`uv lock --check` 通过。（条数比 E1 里记的 5563 多 7 条：`tests/cli/test_help.py` 会把文档里提到的每条 `hubctl` 命令都核对一遍，文档多写了命令，测试就多几条。）安装说明第 2 到 9 步、迁移手册第 4 到 6 步、回退手册的 B 和 C，都在独立运行的假腾讯上走过一遍（演练脚本只在会话的草稿目录里，不进仓库），走完没有 ERROR，数据目录里文件权限都是 0600 / 0700。**还没有做的**：E3、E4 要在 Mac 上、要使用者授权；E5（归档）留到 E4 之后——E4 可能要按实测值改规格和默认值，归档以后再改就得另立变更。
 
 ## 不在本变更里（另立变更，等使用者点头）
 

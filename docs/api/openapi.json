@@ -1,0 +1,995 @@
+{
+  "components": {
+    "schemas": {
+      "AckResult": {
+        "properties": {
+          "acked": {
+            "description": "这次确认了几条",
+            "type": "integer"
+          },
+          "unknown": {
+            "description": "没算数的编号：已经确认过的、过期的、作废的、别人的、不存在的，不分哪种",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "acked",
+          "unknown"
+        ],
+        "type": "object"
+      },
+      "Error": {
+        "properties": {
+          "error": {
+            "properties": {
+              "code": {
+                "description": "英文代码，给程序看",
+                "type": "string"
+              },
+              "message": {
+                "description": "中文说明，不含请求的内容和凭证",
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "type": "object"
+      },
+      "Health": {
+        "properties": {
+          "api": {
+            "type": "string"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ok",
+          "version",
+          "api"
+        ],
+        "type": "object"
+      },
+      "InboxItem": {
+        "properties": {
+          "at": {
+            "description": "使用者发这句话的时间，和 at_ms 是同一个时刻",
+            "format": "date-time",
+            "type": "string"
+          },
+          "at_ms": {
+            "description": "同一个时刻的毫秒时间戳",
+            "type": "integer"
+          },
+          "attempt": {
+            "description": "第几次交给项目",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "has_text": {
+            "type": "boolean"
+          },
+          "id": {
+            "description": "确认时用的编号",
+            "type": "string"
+          },
+          "received_at": {
+            "description": "服务收到的时间",
+            "format": "date-time",
+            "type": "string"
+          },
+          "reply_handle": {
+            "description": "回复这句话用，30 分钟内有效",
+            "type": "string"
+          },
+          "text": {
+            "description": "使用者的话（去掉了前缀）；图片之类没有文字时是空串",
+            "type": "string"
+          },
+          "via": {
+            "description": "怎么路由到本项目的：默认项目、带前缀、可能是对你上一条等确认回复的回答",
+            "enum": [
+              "default",
+              "prefix",
+              "confirm"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "text",
+          "has_text",
+          "at",
+          "at_ms",
+          "received_at",
+          "attempt",
+          "via",
+          "reply_handle"
+        ],
+        "type": "object"
+      },
+      "InboxResult": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/InboxItem"
+            },
+            "type": "array"
+          },
+          "lease_seconds": {
+            "description": "租期：这么多秒内没确认会再给一次",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "lease_seconds"
+        ],
+        "type": "object"
+      },
+      "SendResult": {
+        "properties": {
+          "duplicate": {
+            "description": "是不是 dedupe_key 命中的重放",
+            "type": "boolean"
+          },
+          "id": {
+            "description": "服务里这条发送记录的编号，排错用",
+            "type": "string"
+          },
+          "parts": {
+            "description": "这条话拆成了几条",
+            "type": "integer"
+          },
+          "parts_sent": {
+            "description": "其中发出去的（含拿不准到没到的）条数",
+            "type": "integer"
+          },
+          "quota": {
+            "properties": {
+              "left": {
+                "description": "一条 normal 的推送现在最多能拆成几条",
+                "type": "integer"
+              },
+              "limit": {
+                "description": "一个窗口总共能发几条",
+                "type": "integer"
+              },
+              "window_ends_at": {
+                "description": "窗口没开时是 null",
+                "format": "date-time",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "left",
+              "limit",
+              "window_ends_at"
+            ],
+            "type": "object"
+          },
+          "reason": {
+            "description": "给人看的中文原因，可以直接写进 Bark 的末尾",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason_code": {
+            "description": "给程序看的稳定代码；sent 时是 null",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "description": "最终结果。sent 和 skipped 算微信这边没问题；其余都应当走自己的兜底",
+            "enum": [
+              "sent",
+              "unconfirmed",
+              "partial",
+              "rejected",
+              "failed",
+              "skipped"
+            ]
+          }
+        },
+        "required": [
+          "status",
+          "reason_code",
+          "reason",
+          "parts",
+          "parts_sent",
+          "duplicate",
+          "id",
+          "quota"
+        ],
+        "type": "object"
+      },
+      "Status": {
+        "properties": {
+          "login": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "ok",
+                  "expired",
+                  "missing",
+                  "broken"
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ],
+            "type": "object"
+          },
+          "quota": {
+            "properties": {
+              "free": {
+                "type": "integer"
+              },
+              "limit": {
+                "type": "integer"
+              },
+              "project": {
+                "properties": {
+                  "cap": {
+                    "type": "integer"
+                  },
+                  "guaranteed": {
+                    "type": "integer"
+                  },
+                  "left": {
+                    "type": "integer"
+                  },
+                  "replies_used": {
+                    "type": "integer"
+                  },
+                  "used": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "guaranteed",
+                  "cap",
+                  "used",
+                  "left",
+                  "replies_used"
+                ],
+                "type": "object"
+              },
+              "used": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "limit",
+              "used",
+              "free",
+              "project"
+            ],
+            "type": "object"
+          },
+          "service": {
+            "properties": {
+              "api": {
+                "type": "string"
+              },
+              "inbox_online_seconds": {
+                "description": "多久没取话算不在线",
+                "type": "number"
+              },
+              "send_timeout_seconds": {
+                "description": "服务处理一次发送的总时限",
+                "type": "number"
+              },
+              "version": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "version",
+              "api",
+              "send_timeout_seconds",
+              "inbox_online_seconds"
+            ],
+            "type": "object"
+          },
+          "window": {
+            "properties": {
+              "ends_at": {
+                "format": "date-time",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "open": {
+                "type": "boolean"
+              },
+              "seconds_left": {
+                "type": "integer"
+              },
+              "started_at": {
+                "format": "date-time",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "open",
+              "started_at",
+              "ends_at",
+              "seconds_left"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "service",
+          "login",
+          "window",
+          "quota"
+        ],
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "projectKey": {
+        "description": "项目密钥（chub_ 开头），由运维用 hubctl project add 登记时给出，只显示一次",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "description": "clawbot-hub 的项目接口。除 GET /v1/health 外，每个请求都要带 `Authorization: Bearer <项目密钥>`。非 200 的响应正文一律是 `{\"error\": {\"code\": …, \"message\": …}}`。全部说明、curl 示例和错误代码表见 docs/api/v1.md。",
+    "title": "clawbot-hub",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/v1/health": {
+      "get": {
+        "description": "探活：不要密钥，只说服务活着和版本，不含登录、窗口、项目的任何信息。",
+        "operationId": "get_health",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health",
+                  "additionalProperties": true,
+                  "title": "Response Get Health",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "服务内部出错：internal（发送接口上可能已经向腾讯发过请求）"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "服务正在关闭：shutting_down（没有发出任何东西）"
+          }
+        },
+        "summary": "探活"
+      }
+    },
+    "/v1/inbox": {
+      "get": {
+        "description": "取话：分给调用方这个项目的话，没有就等（最多 `inbox.max_wait` 秒）。同步函数，框架把它\n放进线程池，所以等的时候不占事件循环。",
+        "operationId": "fetch_inbox",
+        "parameters": [
+          {
+            "description": "没有话时最多等几秒（0 不等；超过 inbox.max_wait 的截成它）。不写取 inbox.wait_seconds",
+            "in": "query",
+            "name": "wait",
+            "required": false,
+            "schema": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "最多返回几条（超过 50 的截成它）；0 只是心跳，不租出话",
+            "in": "query",
+            "name": "max",
+            "required": false,
+            "schema": {
+              "default": 10,
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InboxResult"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "请求有问题：bad_request、empty_text、text_too_long 等，见 docs/api/v1.md"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "没带密钥或密钥不对：unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "项目已停用：project_disabled（只推送的项目取话是 push_only）"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "请求太多：rate_limited、too_many_failures 或 reply_limit，带 Retry-After"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "服务内部出错：internal（发送接口上可能已经向腾讯发过请求）"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "服务正在关闭：shutting_down（没有发出任何东西）"
+          }
+        },
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "summary": "取话"
+      }
+    },
+    "/v1/inbox/ack": {
+      "post": {
+        "description": "确认处理完了：不再给，立即清掉正文。重复、别人的、不存在的都不报错，列在 `unknown`。",
+        "operationId": "ack_inbox",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "ids": {
+                    "description": "处理完的话的编号（取话返回的 id）",
+                    "items": {
+                      "type": "string"
+                    },
+                    "maxItems": 50,
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "ids"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AckResult"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "请求有问题：bad_request、empty_text、text_too_long 等，见 docs/api/v1.md"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "没带密钥或密钥不对：unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "项目已停用：project_disabled（只推送的项目取话是 push_only）"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "请求体超过 64 KiB：too_large"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "请求太多：rate_limited、too_many_failures 或 reply_limit，带 Retry-After"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "服务内部出错：internal（发送接口上可能已经向腾讯发过请求）"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "服务正在关闭：shutting_down（没有发出任何东西）"
+          }
+        },
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "summary": "确认处理完了"
+      }
+    },
+    "/v1/messages": {
+      "post": {
+        "description": "发一条消息，拿到最终结果才返回（同步）。",
+        "operationId": "send_message",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "dedupe_key": {
+                    "maxLength": 128,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "on_closed": {
+                    "default": "fail",
+                    "enum": [
+                      "fail",
+                      "skip"
+                    ]
+                  },
+                  "priority": {
+                    "default": "normal",
+                    "enum": [
+                      "urgent",
+                      "normal",
+                      "deferrable"
+                    ]
+                  },
+                  "text": {
+                    "description": "纯文本全文，第一行是标题",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "text"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SendResult"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "请求有问题：bad_request、empty_text、text_too_long 等，见 docs/api/v1.md"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "没带密钥或密钥不对：unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "项目已停用：project_disabled（只推送的项目取话是 push_only）"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "请求体超过 64 KiB：too_large"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "请求太多：rate_limited、too_many_failures 或 reply_limit，带 Retry-After"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "服务内部出错：internal（发送接口上可能已经向腾讯发过请求）"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "服务正在关闭：shutting_down（没有发出任何东西）"
+          }
+        },
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "summary": "发一条消息"
+      }
+    },
+    "/v1/replies": {
+      "post": {
+        "description": "回复使用者的一句话，拿到最终结果才返回（同步）。用取话时给的回复句柄找到那句话的对话凭证。",
+        "operationId": "reply",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "awaiting_confirmation": {
+                    "default": false,
+                    "type": "boolean"
+                  },
+                  "confirm_seconds": {
+                    "description": "等确认留多久，默认 routing.confirm_seconds",
+                    "maximum": 1800.0,
+                    "minimum": 1.0,
+                    "type": "integer"
+                  },
+                  "handle": {
+                    "description": "取话时给的回复句柄",
+                    "type": "string"
+                  },
+                  "text": {
+                    "description": "纯文本全文，第一行是标题",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "handle",
+                  "text"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SendResult"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "请求有问题：bad_request、empty_text、text_too_long 等，见 docs/api/v1.md"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "没带密钥或密钥不对：unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "项目已停用：project_disabled（只推送的项目取话是 push_only）"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "回复句柄不存在或不属于调用方：unknown_handle"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "回复句柄过期：handle_expired"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "请求体超过 64 KiB：too_large"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "请求太多：rate_limited、too_many_failures 或 reply_limit，带 Retry-After"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "服务内部出错：internal（发送接口上可能已经向腾讯发过请求）"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "服务正在关闭：shutting_down（没有发出任何东西）"
+          }
+        },
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "summary": "回复使用者的一句话"
+      }
+    },
+    "/v1/status": {
+      "get": {
+        "description": "调用方自己的额度和全局的登录、窗口状态。",
+        "operationId": "get_status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Status"
+                }
+              }
+            },
+            "description": "成功"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "没带密钥或密钥不对：unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "项目已停用：project_disabled（只推送的项目取话是 push_only）"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "请求太多：rate_limited、too_many_failures 或 reply_limit，带 Retry-After"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "服务内部出错：internal（发送接口上可能已经向腾讯发过请求）"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "服务正在关闭：shutting_down（没有发出任何东西）"
+          }
+        },
+        "security": [
+          {
+            "projectKey": []
+          }
+        ],
+        "summary": "额度和状态"
+      }
+    }
+  }
+}

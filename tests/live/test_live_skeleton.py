@@ -1,11 +1,13 @@
-"""真机测试的骨架检查（任务 0.6）：默认运行时真机测试被跳过；清单里每一项都有一条骨架测试。
+"""真机测试的外壳检查（任务 0.6、E4）：默认运行时真机测试被跳过；清单里每一项都有一条测试。
 
 `tests/live/test_real_ilink.py` 里的测试会访问真实的腾讯接口，只在 Mac 上、使用者在场授权后
 用 `uv run pytest -m live` 手动跑；这里的检查本身不联网、不带 `live` 标记，每次都跑。
+没设 `HUB_LIVE_HOME` 时，哪怕带 `-m live` 也一条都不会去碰腾讯（全部跳过）。
 """
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -17,13 +19,16 @@ LIVE_FILE = "tests/live/test_real_ilink.py"
 
 
 def run_pytest(*args: str) -> subprocess.CompletedProcess[str]:
-    # `-n0`：里面这一遍用单进程跑——默认的并行跑法不报“deselected”，起工作进程也白费时间
+    # `-n0`：里面这一遍用单进程跑——默认的并行跑法不报“deselected”，起工作进程也白费时间。
+    # 环境里的 HUB_LIVE_*（比如 Mac 上正在做 E4 时设着的）要去掉，免得里面这一遍真去碰腾讯
+    env = {name: value for name, value in os.environ.items() if not name.startswith("HUB_LIVE_")}
     return subprocess.run(
         [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-n0", *args],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
         timeout=120,
+        env=env,
     )
 
 
@@ -55,8 +60,8 @@ def test_all_skeleton_tests_carry_the_live_marker():
     assert any(mark.name == "live" for mark in marks)
 
 
-def test_before_the_real_device_run_the_skeletons_skip_instead_of_failing():
+def test_without_the_live_home_every_live_test_skips_instead_of_touching_tencent():
     result = run_pytest("-m", "live", LIVE_FILE, "-q", "-rs")
     assert result.returncode == 0, result.stdout
     assert f"{len(checklist.ITEMS)} skipped" in result.stdout
-    assert "E4" in result.stdout  # 跳过的理由里写着什么时候才填
+    assert "E4" in result.stdout  # 跳过的理由里写着什么时候才设 HUB_LIVE_HOME

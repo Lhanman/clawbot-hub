@@ -18,7 +18,7 @@
 
 - `uv sync`：安装依赖（Python ≥ 3.12，锁文件 `uv.lock`）
 - `uv run pytest`：单元测试，默认跳过 `live`，也不允许联网；默认最多 4 个进程并行（整套约 70 秒，单进程要 4 分多钟），调试单条加 `-n0`
-- `uv run pytest -m live`：真机测试，访问真实的腾讯接口、占用真账号的额度，**要使用者在场授权后才能跑**（做法见 `docs/ops/真机验证清单.md`）
+- `HUB_LIVE_HOME=<E4 数据目录> HUB_TEST_TIMEOUT=0 uv run pytest -m live -n0 -s tests/live/test_real_ilink.py -k <测试名>`：真机测试，访问真实的腾讯接口、占用真账号的额度，**要使用者在场授权后才能跑**；没设 `HUB_LIVE_HOME` 全部跳过。探针在 `tests/live/probes.py`（对着假腾讯自测，每次都跑）。顺序和命令见 `docs/ops/真机验证运行手册.md`，每一项量什么见 `docs/ops/真机验证清单.md`
 - `uv run ruff format` / `uv run ruff check`：格式化、静态检查（只检查不改用 `ruff format --check`）
 - `uv run python -m clawbot_hub.apidoc`：把接口描述导出到 `docs/api/openapi.json`，加 `--check` 只核对；改了接口没重新导出，测试会红
 - `uv run python -m tests.support.fake_ilink --port <端口>`：独立运行的假腾讯（演练和联调用，`/_fake/` 下有控制接口）

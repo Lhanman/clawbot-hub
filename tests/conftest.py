@@ -7,7 +7,7 @@
   127.0.0.1:7890，而 `[::1]` 和公网地址都不在系统的例外名单里），请求被代理接走，测试结果就
   取决于这台机器的网络设置了。放了 `NO_PROXY` 以后只看环境变量，系统设置不再参与
 - 卡死看门狗：一个测试超过 `HUB_TEST_TIMEOUT` 秒（默认 120）就打印所有线程的栈并退出，
-  免得死锁把整个测试静悄悄地挂住
+  免得死锁把整个测试静悄悄地挂住（`live` 标记的真机测试不受它管：它们要等人、要隔很久）
 """
 
 from __future__ import annotations
@@ -65,8 +65,10 @@ def _network_guard(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPat
 
 
 @pytest.fixture(autouse=True)
-def _hang_watchdog():
+def _hang_watchdog(request: pytest.FixtureRequest):
     seconds = float(os.environ.get("HUB_TEST_TIMEOUT", "120"))
+    if _is_live(request):  # 真机测试要等使用者发话、要隔几十分钟回复，不受这个看门狗管
+        seconds = 0
     if seconds > 0:
         faulthandler.dump_traceback_later(seconds, exit=True)
     yield

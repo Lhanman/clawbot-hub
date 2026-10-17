@@ -2,7 +2,10 @@
 
 - 联网守卫：`live` 以外的测试只能连本机回环（`tests/support/netguard.py`）
 - 家目录隔离：`HOME`、`CLAWBOT_HUB_HOME` 指向临时目录，任何测试都碰不到真实的数据目录
-- 代理环境清掉：回环请求不绕代理（云里和有系统代理的机器上都一样）
+- 代理环境清掉：回环请求不绕代理。环境变量里的代理项一律删掉，再放一个只含回环地址的 `NO_PROXY`：
+  环境变量里一个代理项都没有时，Python 会去读系统的代理设置（Mac 上开着代理软件就是
+  127.0.0.1:7890，而 `[::1]` 和公网地址都不在系统的例外名单里），请求被代理接走，测试结果就
+  取决于这台机器的网络设置了。放了 `NO_PROXY` 以后只看环境变量，系统设置不再参与
 - 卡死看门狗：一个测试超过 `HUB_TEST_TIMEOUT` 秒（默认 120）就打印所有线程的栈并退出，
   免得死锁把整个测试静悄悄地挂住
 """
@@ -31,6 +34,10 @@ PROXY_VARS = (
     "NO_PROXY",
     "no_proxy",
 )
+# 测试里唯一不走代理的名单：本机回环（`[::1]` 带方括号和不带的写法都列上，
+# `requests` 和 `urllib` 各认一种）。只有回环：测试里故意设了 `HTTP_PROXY` / `HTTPS_PROXY`
+# 去验证代理行为的，目标都是假域名
+LOOPBACK_NO_PROXY = "127.0.0.1,localhost,::1,[::1]"
 
 
 def _is_live(request: pytest.FixtureRequest) -> bool:
@@ -51,6 +58,8 @@ def _network_guard(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPat
         return
     for name in PROXY_VARS:
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("NO_PROXY", LOOPBACK_NO_PROXY)
+    monkeypatch.setenv("no_proxy", LOOPBACK_NO_PROXY)
     with netguard.block_network():
         yield
 

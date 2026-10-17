@@ -39,7 +39,7 @@ from clawbot_hub.config import Config
 from clawbot_hub.db import Database, migrate
 from clawbot_hub.paths import HubPaths, ensure_home
 from tests.alerts.conftest import DEVICE, StubBark
-from tests.conftest import PROXY_VARS
+from tests.conftest import LOOPBACK_NO_PROXY, PROXY_VARS
 from tests.support.fake_bark import FakeBark
 from tests.support.fake_clock import FakeClock
 from tests.support.fake_ilink import FakeIlink
@@ -223,10 +223,12 @@ def auth(key: str) -> dict[str, str]:
 
 
 def child_env(**extra: str) -> dict[str, str]:
-    """子进程的环境变量：没有代理（回环请求不绕路）、没有测试进程的数据目录和设备码。"""
+    """子进程的环境变量：没有代理（回环请求不绕路，也不去读系统的代理设置，原因见
+    `tests/conftest.py`）、没有测试进程的数据目录和设备码。"""
     env = {k: v for k, v in os.environ.items() if k not in PROXY_VARS}
     for name in ("CLAWBOT_HUB_HOME", ENV_KEY, "CLAWBOT_HUB_KEY"):
         env.pop(name, None)
+    env.update(NO_PROXY=LOOPBACK_NO_PROXY, no_proxy=LOOPBACK_NO_PROXY)
     env.update(PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8", NO_COLOR="1")
     env.update(extra)
     return env

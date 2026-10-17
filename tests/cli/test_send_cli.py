@@ -182,6 +182,9 @@ def test_redirects_are_not_followed_so_the_key_never_travels_further(run, server
 def test_proxies_and_netrc_from_the_environment_are_ignored(run, server, monkeypatch, tmp_path):
     monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")  # 如果走代理，这里连不上
     monkeypatch.setenv("http_proxy", "http://127.0.0.1:9")
+    # 夹具给的 NO_PROXY 列着回环地址，目标也是回环地址：不去掉的话，就算命令真走了代理也会被绕开
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
     netrc = tmp_path.parent / "home-netrc"
     netrc.write_text("machine 127.0.0.1 login someone password secret\n", encoding="utf-8")
     netrc.chmod(0o600)

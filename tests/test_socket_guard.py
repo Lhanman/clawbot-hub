@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import socket
+import tempfile
 import urllib.request
 from pathlib import Path
 
@@ -138,13 +139,16 @@ def test_getaddrinfo_of_loopback_names_is_allowed():
     assert socket.getaddrinfo(None, 80, flags=socket.AI_PASSIVE)
 
 
-def test_unix_sockets_are_allowed(tmp_path):
-    path = str(tmp_path / "s.sock")
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
-        server.bind(path)
-        server.listen(1)
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-            client.connect(path)
+def test_unix_sockets_are_allowed():
+    # AF_UNIX 的路径在 macOS 上最长 104 字节，pytest 的临时目录在 Mac 上有一百多字节：
+    # 用 /tmp 下的短目录
+    with tempfile.TemporaryDirectory(prefix="hub", dir="/tmp") as folder:
+        path = os.path.join(folder, "s.sock")
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+            server.bind(path)
+            server.listen(1)
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                client.connect(path)
 
 
 @pytest.mark.parametrize(
@@ -203,6 +207,15 @@ def test_proxy_environment_is_cleared_so_loopback_calls_never_go_through_a_proxy
     # getproxies() 还会列出 NO_PROXY、GLOBAL_AGENT_HTTPS_PROXY 之类，不影响 requests；
     # 真正会让请求绕道的只有 http / https / all 三项
     assert not {"http", "https", "all"} & set(urllib.request.getproxies())
+    # 回环地址明说不走代理（`[::1]` 也是）：环境变量里没有代理项时 Python 会去读系统设置，
+    # Mac 上开着代理软件，系统设置里的例外名单通常只有 127.0.0.1 和 localhost
+    for host, url in (
+        ("127.0.0.1", "http://127.0.0.1:80/"),
+        ("localhost", "http://localhost:80/"),
+        ("::1", "http://[::1]:80/"),
+    ):
+        assert urllib.request.proxy_bypass(host), host
+        assert requests.utils.get_environ_proxies(url) == {}, url
 
 
 def test_hub_home_and_home_point_into_a_temp_dir_never_the_real_one():

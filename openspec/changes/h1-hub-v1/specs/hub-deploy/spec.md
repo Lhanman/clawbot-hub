@@ -25,7 +25,7 @@
 
 `run.json` 的字段：`pid`、`started_ms`、`version`、`listen`（监听地址和端口）、`profile`（上游档位）、`confirm`（送达确认档位）、`last_heartbeat_ms`（定时任务每个周期，即每 30 秒更新一次）、`clean_exit`（正常退出时才为真）。写 `run.json` 一律先写临时文件再改名。`hubctl` 用它判断服务在不在运行（见 `hub-cli`），`service_restarted` 告警用它的最后心跳时间（见 `hub-alerts`）。
 
-服务创建的任何文件 MUST 在创建时就是这个权限（进程的 umask 设为 077，临时文件也一样），不能"先创建再改权限"。启动时发现已有文件或目录的权限更宽，MUST 改回并在日志里写一条警告。`launchd.log` 是 launchd 在服务启动之前创建的，它的权限由 launchd 决定，所以 plist 里要设 `Umask`（见"运行环境"），启动时同样改回。
+服务创建的任何文件 MUST 在创建时就是这个权限（进程的 umask 设为 077，临时文件也一样），不能"先创建再改权限"。启动时发现已有文件或目录的权限更宽，MUST 改回并在日志里写一条警告。`launchd.log` 是 launchd 在服务启动之前创建的，它的权限由 launchd 决定，所以 plist 里要设 `Umask`（见"运行环境"），启动时同样改回。（2026-10-17 在 Mac 上实测：`Umask` 对 `launchd.log` 文件生效，对 launchd 替它新建的 `logs/` 目录不生效，目录是 0744；所以第一次安装、`logs/` 是 launchd 新建的时候，启动时会改回 0700 并记一条警告，这是正常的。）
 
 #### Scenario: 新建的文件权限
 

@@ -22,9 +22,10 @@ from tests.upstream.conftest import CONTEXT, TOKEN, poll, send
 
 LEGACY_HEADERS = {"content-type", "authorizationtype", "authorization", "x-wechat-uin"}
 OFFICIAL_HEADERS = LEGACY_HEADERS | {"ilink-app-id", "ilink-app-clientversion"}
+# E4（2026-10-18）在真账号上量过：只有带 /msg 的路径可用，不带的回 404
 NOTIFY_PATHS = {
-    "notifystart": ("/ilink/bot/notifystart", "/ilink/bot/msg/notifystart"),
-    "notifystop": ("/ilink/bot/notifystop", "/ilink/bot/msg/notifystop"),
+    "notifystart": ("/ilink/bot/msg/notifystart",),
+    "notifystop": ("/ilink/bot/msg/notifystop",),
 }
 
 

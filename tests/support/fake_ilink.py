@@ -77,8 +77,9 @@ ENDPOINTS = (*API_ENDPOINTS, ROOT)
 BOT_TOKEN_ENDPOINTS = (GETUPDATES, SENDMESSAGE, NOTIFYSTART, NOTIFYSTOP)
 _PATHS = {f"/ilink/bot/{name}": name for name in API_ENDPOINTS}
 _PATHS["/"] = ROOT
-# notifystart / notifystop 的真实路径规格里没写明（官方插件里似乎带一层 /msg）：两种都认，
-# 真机验证时再确定 `upstream/http.py` 该用哪个
+# notifystart / notifystop 的路径：E4（2026-10-18）在真账号上量过，带 `/msg` 的可用（200，ret 0），
+# 不带的回 404。两种都收、都记在 notifystart / notifystop 名下（可以编排），但不带 `/msg` 的默认回
+# 404，和真的一样——生产代码走错了路径，测试里会看到警告
 _PATHS["/ilink/bot/msg/notifystart"] = NOTIFYSTART
 _PATHS["/ilink/bot/msg/notifystop"] = NOTIFYSTOP
 
@@ -99,6 +100,10 @@ def ok(**fields: Any) -> Reply:
 def error(ret: int, errmsg: str = "", *, key: str = "ret", status: int = 200) -> Reply:
     """业务错误：`{"ret": 40001, "errmsg": "bad token"}`；`key="errcode"` 时用 errcode 表示。"""
     return Reply(status=status, body={key: ret, "errmsg": errmsg})
+
+
+def _not_found_page() -> Reply:
+    return Reply(status=404, body="<html><body>Not Found</body></html>")
 
 
 def session_expired(*, status: int = 200, key: str = "ret") -> Reply:
@@ -287,11 +292,14 @@ class FakeIlink(FakeHttp):
             SENDMESSAGE: self._sendmessage,
             GET_BOT_QRCODE: self._get_bot_qrcode,
             GET_QRCODE_STATUS: self._get_qrcode_status,
-            NOTIFYSTART: lambda _r: ok(),
-            NOTIFYSTOP: lambda _r: ok(),
-            ROOT: lambda _r: Reply(status=404, body="<html><body>Not Found</body></html>"),
+            NOTIFYSTART: self._notify,
+            NOTIFYSTOP: self._notify,
+            ROOT: lambda _r: _not_found_page(),
         }[endpoint]
         return handler(request)
+
+    def _notify(self, request: RecordedRequest) -> Reply:
+        return ok() if request.path.startswith("/ilink/bot/msg/") else _not_found_page()
 
     def _getupdates(self, request: RecordedRequest) -> Reply:
         body = request.json if isinstance(request.json, dict) else {}

@@ -21,7 +21,7 @@ def test_fake_ilink_fixture_is_running_and_stamps_messages_with_the_fake_time(fa
     clock.advance(90)
     message = fake_ilink.push_user_message("你好")
     assert message["create_time_ms"] == DEFAULT_START_MS + 90_000
-    reply = requests.post(f"{fake_ilink.base_url}/ilink/bot/notifystart", json={}, timeout=3)
+    reply = requests.post(f"{fake_ilink.base_url}/ilink/bot/msg/notifystart", json={}, timeout=3)
     assert reply.json()["ret"] == 0
 
 

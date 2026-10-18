@@ -68,11 +68,11 @@ def test_start_gives_a_loopback_url_and_stop_closes_the_port():
     server = FakeIlink().start()
     url = server.base_url
     assert url.startswith("http://127.0.0.1:")
-    assert requests.post(f"{url}{BOT}notifystart", json={}, timeout=3).status_code == 200
+    assert requests.post(f"{url}{BOT}msg/notifystart", json={}, timeout=3).status_code == 200
     server.stop()
     server.stop()  # 再停一次没关系
     with pytest.raises(requests.ConnectionError):
-        requests.post(f"{url}{BOT}notifystart", json={}, timeout=1)
+        requests.post(f"{url}{BOT}msg/notifystart", json={}, timeout=1)
 
 
 def test_unknown_paths_are_404_and_not_recorded(fake):
@@ -129,8 +129,8 @@ def test_custom_header_names_leave_out_the_transport_headers(fake):
 def test_connection_id_tells_new_connections_from_reused_ones(fake):
     with requests.Session() as session:
         for _ in range(2):
-            session.post(f"{fake.base_url}{BOT}notifystart", json={}, timeout=3)
-    post(fake, "notifystart", {})  # 另一条连接
+            session.post(f"{fake.base_url}{BOT}msg/notifystart", json={}, timeout=3)
+    post(fake, "msg/notifystart", {})  # 另一条连接
     ids = [r.connection_id for r in fake.requests]
     assert ids[0] == ids[1] != ids[2]
 
@@ -336,7 +336,7 @@ def test_truncated_response_breaks_in_the_middle_of_the_body(fake):
 
 def test_close_after_response_closes_idle_connections_silently():
     with FakeIlink(close_after_response=True) as server:
-        sock = raw_request(server, "notifystart")
+        sock = raw_request(server, "msg/notifystart")
         with sock:
             sock.settimeout(3)
             data = b""
@@ -610,15 +610,26 @@ def test_a_new_login_only_sees_messages_pushed_after_it(fake):
 # ---------------------------------------------------------------- notify
 
 
-@pytest.mark.parametrize("path", ["notifystart", "notifystop", "msg/notifystart", "msg/notifystop"])
-def test_notify_endpoints_answer_ok_under_both_spellings_of_the_path(fake, path):
+@pytest.mark.parametrize("path", ["msg/notifystart", "msg/notifystop"])
+def test_notify_endpoints_answer_ok_under_the_path_the_real_service_accepts(fake, path):
     assert post(fake, path, {"base_info": {}}).json() == {"ret": 0, "errmsg": ""}
     assert fake.requests[0].endpoint == path.removeprefix("msg/")
 
 
+@pytest.mark.parametrize("path", ["notifystart", "notifystop"])
+def test_notify_paths_without_msg_answer_404_like_the_real_service(fake, path):
+    """E4（2026-10-18）在真账号上量过：不带 /msg 的路径回 404，带 /msg 的回 200、ret 0。
+    请求照样记下来、归在 notifystart / notifystop 名下（可以编排），只是默认回的是 404。"""
+    response = post(fake, path, {"base_info": {}})
+    assert response.status_code == 404
+    assert fake.requests[0].endpoint == path
+    fake.script(path, fi.ok())
+    assert post(fake, path, {"base_info": {}}).json() == {"ret": 0, "errmsg": ""}
+
+
 def test_notify_failures_can_be_scripted(fake):
     fake.script("notifystart", fi.error(500, "boom"))
-    assert post(fake, "notifystart", {}).json()["ret"] == 500
+    assert post(fake, "msg/notifystart", {}).json()["ret"] == 500
 
 
 # ---------------------------------------------------------------- /_fake/ 控制接口

@@ -23,12 +23,10 @@ from clawbot_hub.paths import HubPaths, ensure_home
 from tests.live import probes
 from tests.support.fake_ilink import (
     GETUPDATES,
-    NOTIFYSTART,
     SENDMESSAGE,
     FakeIlink,
     error,
     hang,
-    http_status,
     ok,
 )
 
@@ -187,7 +185,7 @@ def test_qr_failures_are_recorded_not_raised(tmp_path):
 
 
 def test_notify_paths_probes_both_paths_with_the_official_headers_and_never_notifystop(lab):
-    lab.fake.script(NOTIFYSTART, http_status(404), ok())
+    # 假腾讯默认就和 E4 量到的真腾讯一样：不带 /msg 回 404，带 /msg 回 200
     result = probes.notify_paths(lab.env)
     assert result == {"/ilink/bot/notifystart": 404, "/ilink/bot/msg/notifystart": 200}
     requests_made = lab.fake.requests_to("notifystart")

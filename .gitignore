@@ -34,3 +34,6 @@ clawbot-login*.png
 .DS_Store
 .idea/
 .vscode/
+
+# Bark 设备码文件
+bark.json
